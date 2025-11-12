@@ -1,0 +1,30 @@
+# Windows Machine Requirements
+# Device server for Windows-connected devices
+
+# Web Framework
+fastapi==0.109.0
+uvicorn==0.27.0
+pydantic==2.6.0
+requests==2.31.0
+
+# Device Communication
+pyserial==3.5          # For CAEN power supply if serial
+pyvisa==1.14.1         # For instrument communication (alternative)
+pyvisa-py==0.7.1       # Pure Python VISA backend
+
+# Utilities
+python-dotenv==1.0.0
+loguru==0.7.2
+pyyaml==6.0.1
+numpy==1.26.4
+pythonnet==3.0.3
+
+# Data handling - use older pandas that has 32-bit wheels
+pandas==2.0.3
+
+# Note: CAEN desktop power supply drivers
+# Check CAEN website for Windows-specific SDK/DLLs
+# May require: pip install caen-libs (if available)
+
+# Note: Tama Electric laser - currently manual control via .exe
+# Will add automation if command-line interface is discovered

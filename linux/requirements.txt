@@ -1,0 +1,30 @@
+# Linux Machine Requirements
+# Main control server, GUI, and Linux-connected devices
+
+# Web Framework & GUI
+streamlit==1.31.0
+fastapi==0.109.0
+uvicorn==0.27.0
+pydantic==2.6.0
+
+# Device Communication
+pyserial==3.5          # For SiPM power supply (IPS 2303S)
+requests==2.31.0       # For API calls to Windows machine
+
+# Database
+sqlalchemy==2.0.25     # ORM for metadata database
+pandas>=2.2.0          # Data handling (2.2+ supports Python 3.13)
+
+# Ufactory Cobot
+# Note: Install from: pip install ufactory
+# Or check: https://github.com/xArm-Developer/xArm-Python-SDK
+
+# CAEN Digitizer
+# Note: Requires manual installation of CAENDigitizer library
+# Download from: https://www.caen.it/products/caendigitizer-library/
+# Python wrapper can be custom or use: python-caen
+
+# Utilities
+python-dotenv==1.0.0   # Environment variables
+loguru==0.7.2          # Better logging
+pyyaml==6.0.1          # Config files
