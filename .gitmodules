@@ -1,0 +1,6 @@
+[submodule "windows/pysdg1032x"]
+	path = windows/pysdg1032x
+	url = https://github.com/tspspi/pysdg1032x.git
+[submodule "linux/xArm-Python-SDK"]
+	path = linux/xArm-Python-SDK
+	url = https://github.com/xArm-Developer/xArm-Python-SDK.git
