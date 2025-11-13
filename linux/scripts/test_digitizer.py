@@ -45,10 +45,7 @@ def main():
     
     if not status['connected']:
         print("\n⚠ Digitizer not connected!")
-        print("   Check:")
-        print("   1. USB cable connected?")
-        print("   2. Kernel module loaded? Run: lsmod | grep CAEN")
-        print("   3. USB device present? Run: lsusb | grep -i caen")
+        print("   Check: USB cable, kernel module, device presence")
         return False
     
     if not status['kernel_module']:
@@ -56,13 +53,20 @@ def main():
         print("   Run: source sourceatstart.sh")
         return False
     
-    # Configure for short test
-    print("\n3. Configuring for test acquisition...")
+    # Configure with trigger
+    print("\n3. Configuring acquisition...")
+    print("   - Duration: 5 seconds")
+    print("   - Channels: 2, 3, 4 (PMT1, PMT2, Monitor)")
+    print("   - Trigger: Ch4, threshold=1")
+    
     try:
         digitizer.configure(
-            run_duration=5,      # 5 second test
-            channels=[2, 3, 4],  # PMT1, PMT2, PMT3
-            record_length=1024   # Optional: override record length
+            run_duration=5,
+            channels=[2, 3, 4],
+            trigger_channel=4,
+            trigger_threshold=1,
+            channel_trigger_mode="ACQUISITION_ONLY",
+            record_length=1024
         )
         print("✓ Configuration written")
     except Exception as e:
@@ -70,14 +74,15 @@ def main():
         return False
     
     # Test acquisition
-    print("\n4. Running test acquisition (5 seconds)...")
-    print("   (WaveDump will run, you should see its output)")
+    print("\n4. Running acquisition (5 seconds)...")
+    print("   " + "=" * 56)
     
     try:
-        success = digitizer.acquire(timeout=15)
+        success = digitizer.acquire(timeout=15, show_output=False)
         
+        print("   " + "=" * 56)
         if success:
-            print("✓ Acquisition completed successfully")
+            print("✓ Acquisition completed")
         else:
             print("✗ Acquisition failed")
             return False
@@ -88,20 +93,20 @@ def main():
     
     # Check for waveform files
     print("\n5. Checking for waveform files...")
-    waveforms = digitizer.get_all_waveforms([2, 3, 4])
+    waveform_files = digitizer.get_all_waveforms([2, 3, 4])
     
-    for ch, waveform in waveforms.items():
-        time_data, adc_data = waveform
-        print(f"   Ch{ch}: {len(time_data)} samples, "
-              f"mean ADC = {adc_data.mean():.1f}")
-    
-    if not waveforms:
+    if waveform_files:
+        for ch, filepath in waveform_files.items():
+            filesize = filepath.stat().st_size
+            print(f"   Ch{ch}: {filepath.name} ({filesize:,} bytes)")
+        print(f"\n   ✓ Found {len(waveform_files)} waveform files")
+        print("   Note: Waveform analysis should be done offline")
+    else:
         print("   ⚠ No waveform files found!")
-        print("   Check if wave*.txt files were created")
         return False
     
     # Test file organization
-    print("\n6. Testing file organization...")
+    print("\n6. Organizing files...")
     try:
         save_path = digitizer.organize_files(
             save_dir="/home/hyperkaus/WaveDumpSaves/test_acquisition",
@@ -123,6 +128,9 @@ def main():
     print("✓ ALL TESTS PASSED!")
     print("=" * 60)
     print(f"\nData saved to: {save_path}")
+    print("\nNext steps:")
+    print("  - Use wavepro or other tools for waveform analysis")
+    print("  - Check saved files for format and content")
     
     return True
 

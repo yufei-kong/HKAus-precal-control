@@ -161,6 +161,9 @@ class CAENDigitizerWaveDump:
         channels: List[int],
         record_length: Optional[int] = None,
         post_trigger: Optional[int] = None,
+        trigger_channel: Optional[int] = None,
+        trigger_threshold: Optional[int] = None,
+        channel_trigger_mode: Optional[str] = None,
         other_params: Optional[Dict[str, any]] = None
     ):
         """
@@ -171,6 +174,10 @@ class CAENDigitizerWaveDump:
             channels: List of channels to enable (0-7)
             record_length: Number of samples per waveform (default: use template)
             post_trigger: Post-trigger percentage (0-100, default: use template)
+            trigger_channel: Channel to use for triggering (0-7, default: no change)
+            trigger_threshold: Trigger threshold in ADC counts (default: no change)
+            channel_trigger_mode: Trigger mode per channel: 'DISABLED', 'ACQUISITION_ONLY', 
+                                  'ACQUISITION_AND_TRGOUT' (default: no change)
             other_params: Additional parameters to modify in config
         """
         logger.info(f"Configuring digitizer:")
@@ -205,19 +212,38 @@ class CAENDigitizerWaveDump:
                     logger.debug(f"  Set POST_TRIGGER to {post_trigger}%")
                     break
         
-        # Enable/disable channels
-        # This is template-specific - adjust line numbers as needed
-        # Standard template has channel configs starting around line 140
-        channel_line_map = self._find_channel_lines(lines)
+        # Enable/disable channels and set trigger parameters
+        channel_sections = self._find_channel_sections(lines)
         
         for ch in range(8):
-            if ch in channel_line_map:
-                line_idx = channel_line_map[ch]
-                if ch in channels:
-                    lines[line_idx] = "ENABLE_INPUT           YES\n"
-                    logger.debug(f"  Enabled Ch{ch} ({self.channel_names[ch]})")
-                else:
-                    lines[line_idx] = "ENABLE_INPUT           NO\n"
+            if ch in channel_sections:
+                section_start, section_end = channel_sections[ch]
+                
+                # Enable/disable channel
+                for i in range(section_start, section_end):
+                    if lines[i].strip().startswith("ENABLE_INPUT"):
+                        if ch in channels:
+                            lines[i] = "ENABLE_INPUT           YES\n"
+                            logger.debug(f"  Enabled Ch{ch} ({self.channel_names[ch]})")
+                        else:
+                            lines[i] = "ENABLE_INPUT           NO\n"
+                        break
+                
+                # Set trigger threshold for specific channel if specified
+                if trigger_channel is not None and ch == trigger_channel and trigger_threshold is not None:
+                    for i in range(section_start, section_end):
+                        if lines[i].strip().startswith("TRIGGER_THRESHOLD"):
+                            lines[i] = f"TRIGGER_THRESHOLD      {trigger_threshold}\n"
+                            logger.debug(f"  Set Ch{ch} TRIGGER_THRESHOLD to {trigger_threshold}")
+                            break
+                
+                # Set channel trigger mode for specific channel if specified
+                if trigger_channel is not None and ch == trigger_channel and channel_trigger_mode is not None:
+                    for i in range(section_start, section_end):
+                        if lines[i].strip().startswith("CHANNEL_TRIGGER"):
+                            lines[i] = f"CHANNEL_TRIGGER        {channel_trigger_mode}\n"
+                            logger.debug(f"  Set Ch{ch} CHANNEL_TRIGGER to {channel_trigger_mode}")
+                            break
         
         # Apply other parameters if provided
         if other_params:
@@ -234,46 +260,56 @@ class CAENDigitizerWaveDump:
         
         logger.info(f"✓ Configuration written to {self.config_file}")
     
-    def _find_channel_lines(self, lines: List[str]) -> Dict[int, int]:
+    def _find_channel_sections(self, lines: List[str]) -> Dict[int, Tuple[int, int]]:
         """
-        Find the line numbers for ENABLE_INPUT for each channel.
+        Find the line range for each channel's configuration section.
         
-        This searches for channel markers in the config file.
+        This searches for channel markers like [0], [1], etc. and finds
+        the start and end of each channel's configuration block.
         
         Args:
             lines: Config file lines
             
         Returns:
-            Dict mapping channel number to ENABLE_INPUT line number
+            Dict mapping channel number to (start_line, end_line) tuple
         """
-        channel_lines = {}
+        channel_sections = {}
         current_channel = None
+        section_start = None
         
         for i, line in enumerate(lines):
             # Look for channel markers like [0], [1], etc.
-            if line.strip().startswith('[') and line.strip().endswith(']'):
+            stripped = line.strip()
+            if stripped.startswith('[') and stripped.endswith(']'):
+                # Save previous channel section
+                if current_channel is not None and section_start is not None:
+                    channel_sections[current_channel] = (section_start, i)
+                
+                # Start new channel section
                 try:
-                    current_channel = int(line.strip()[1:-1])
+                    current_channel = int(stripped[1:-1])
+                    section_start = i
                 except ValueError:
                     current_channel = None
-            
-            # If we're in a channel section and find ENABLE_INPUT
-            if current_channel is not None and line.strip().startswith("ENABLE_INPUT"):
-                channel_lines[current_channel] = i
-                current_channel = None  # Reset to avoid duplicates
+                    section_start = None
         
-        return channel_lines
+        # Don't forget the last channel
+        if current_channel is not None and section_start is not None:
+            channel_sections[current_channel] = (section_start, len(lines))
+        
+        return channel_sections
     
     # =========================================================================
     # Data Acquisition
     # =========================================================================
     
-    def acquire(self, timeout: Optional[int] = None) -> bool:
+    def acquire(self, timeout: Optional[int] = None, show_output: bool = True) -> bool:
         """
         Run data acquisition using WaveDump.
         
         Args:
             timeout: Maximum time to wait (seconds). If None, uses run_duration + 30s
+            show_output: If True, print WaveDump output to console
             
         Returns:
             True if acquisition completed successfully
@@ -285,13 +321,22 @@ class CAENDigitizerWaveDump:
         logger.info(f"Starting acquisition (timeout: {timeout}s)...")
         
         try:
-            result = subprocess.run(
-                [self.wavedump_path, str(self.config_file)],
-                cwd=str(self.working_dir),
-                timeout=timeout,
-                capture_output=True,
-                text=True
-            )
+            if show_output:
+                # Show output in real-time
+                result = subprocess.run(
+                    [self.wavedump_path, str(self.config_file)],
+                    cwd=str(self.working_dir),
+                    timeout=timeout
+                )
+            else:
+                # Capture output (old behavior)
+                result = subprocess.run(
+                    [self.wavedump_path, str(self.config_file)],
+                    cwd=str(self.working_dir),
+                    timeout=timeout,
+                    capture_output=True,
+                    text=True
+                )
             
             if result.returncode == 0:
                 logger.info("✓ Acquisition completed successfully")
@@ -301,7 +346,7 @@ class CAENDigitizerWaveDump:
                 return True
             else:
                 logger.error(f"WaveDump failed with return code {result.returncode}")
-                if result.stderr:
+                if not show_output and result.stderr:
                     logger.error(f"Error output: {result.stderr}")
                 return False
                 
@@ -383,58 +428,49 @@ class CAENDigitizerWaveDump:
     # Data Retrieval
     # =========================================================================
     
-    def get_waveform(self, channel: int) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    def get_waveform(self, channel: int) -> Optional[Path]:
         """
-        Read waveform data from wave file.
+        Check if waveform file exists for a channel.
+        
+        Returns the file path if it exists. Actual parsing/analysis
+        should be done by separate offline tools.
         
         Args:
             channel: Channel number (0-7)
             
         Returns:
-            Tuple of (time_array, adc_array) or None if file doesn't exist
+            Path to waveform file if exists, None otherwise
         """
         wave_file = self.working_dir / f"wave{channel}.txt"
         
-        if not wave_file.exists():
-            logger.debug(f"Waveform file not found: {wave_file}")
-            return None
-        
-        try:
-            # WaveDump format: two columns (time, ADC)
-            data = np.loadtxt(wave_file)
-            
-            if len(data.shape) == 2 and data.shape[1] == 2:
-                time_data = data[:, 0]
-                adc_data = data[:, 1]
-                logger.debug(f"Read {len(time_data)} samples from Ch{channel}")
-                return time_data, adc_data
-            else:
-                logger.warning(f"Unexpected data format in {wave_file}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error reading waveform Ch{channel}: {e}")
+        if wave_file.exists():
+            logger.debug(f"Ch{channel}: Waveform file found at {wave_file}")
+            return wave_file
+        else:
+            logger.debug(f"Ch{channel}: Waveform file not found")
             return None
     
-    def get_all_waveforms(self, channels: List[int]) -> Dict[int, Tuple[np.ndarray, np.ndarray]]:
+    def get_all_waveforms(self, channels: List[int]) -> Dict[int, Path]:
         """
-        Read waveforms for multiple channels.
+        Check which waveform files exist for given channels.
+        
+        Returns paths to files, not actual data. Analysis should be done offline.
         
         Args:
             channels: List of channel numbers
             
         Returns:
-            Dict mapping channel -> (time_array, adc_array)
+            Dict mapping channel -> Path to waveform file (only for channels with files)
         """
-        waveforms = {}
+        waveform_files = {}
         
         for ch in channels:
-            waveform = self.get_waveform(ch)
-            if waveform is not None:
-                waveforms[ch] = waveform
+            wave_file = self.get_waveform(ch)
+            if wave_file is not None:
+                waveform_files[ch] = wave_file
         
-        logger.info(f"Retrieved waveforms for {len(waveforms)} channels")
-        return waveforms
+        logger.info(f"Found waveform files for {len(waveform_files)} channels")
+        return waveform_files
     
     # =========================================================================
     # File Organization
