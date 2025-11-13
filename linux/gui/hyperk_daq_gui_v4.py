@@ -14,6 +14,15 @@ from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 import json
+import sys
+import os
+
+# Add xArm SDK to path
+script_dir = os.path.dirname(os.path.abspath(__file__))
+linux_dir = os.path.dirname(script_dir)  # Go up to linux/ folder
+xarm_sdk_path = os.path.join(linux_dir, "xArm-Python-SDK")
+if xarm_sdk_path not in sys.path:
+    sys.path.insert(0, xarm_sdk_path)
 
 # Page config
 st.set_page_config(
@@ -282,6 +291,44 @@ def get_sequence_list():
         return default_sequences + custom_sequences + ["Create New Custom Scan..."]
     else:
         return default_sequences + ["Create New Custom Scan..."]
+
+# Initialize hardware (add this section)
+if 'system' not in st.session_state and not st.session_state.get('mock_mode', False):
+    try:
+        # Import required modules
+        from xarm.wrapper import XArmAPI
+        from drivers.xarm_pmt_controller import XArmPMTController
+        from drivers.caen_digitizer_wavedump import CAENDigitizerWaveDump
+        from drivers.system_coordinator import HyperKSystemCoordinator
+        from api_client.device_api_client import WindowsDeviceClient
+        
+        # Connect to robot
+        arm = XArmAPI('192.168.1.xxx')  # ← YOUR ROBOT IP HERE
+        arm.connect()
+        
+        # Initialize digitizer
+        digitizer = CAENDigitizerWaveDump(
+            wavedump_path="/usr/local/bin/WaveDump",
+            config_template="configs/WaveDumpConfig_template.txt"
+        )
+        
+        # Initialize robot controller
+        robot = XArmPMTController(arm=arm, digitizer=digitizer)
+        
+        # Initialize API client for Windows devices
+        api_client = WindowsDeviceClient("192.168.0.186")  # ← YOUR WINDOWS IP HERE
+        
+        # Create system coordinator
+        st.session_state.system = HyperKSystemCoordinator(
+            robot_controller=robot,
+            api_client=api_client
+        )
+        
+        st.success("✓ All systems initialized")
+        
+    except Exception as e:
+        st.error(f"Initialization failed: {e}")
+        st.session_state.system = None
 
 # Initialize session state
 if 'authenticated' not in st.session_state:

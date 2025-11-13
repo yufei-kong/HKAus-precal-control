@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""
+Simple test script for CAEN digitizer driver.
+Tests digitizer without any robot movements.
+"""
+
+import sys
+import os
+from pathlib import Path
+
+# # Add drivers to path
+# sys.path.insert(0, str(Path(__file__).parent / "drivers"))
+
+# Add parent directory to path so we can import drivers
+script_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(script_dir)
+sys.path.insert(0, parent_dir)
+
+from drivers.caen_digitizer_wavedump import CAENDigitizerWaveDump
+
+def main():
+    print("=" * 60)
+    print("CAEN Digitizer Test")
+    print("=" * 60)
+    
+    # Initialize digitizer
+    print("\n1. Initializing digitizer...")
+    try:
+        digitizer = CAENDigitizerWaveDump(
+            wavedump_path="/home/hyperkaus/CAEN/wavedump-3.10.6-augmented/src/wavedump",
+            config_template="./configs/wavedumpconfig_template.txt",
+            working_dir="."  # Current directory
+        )
+        print("✓ Digitizer initialized")
+    except Exception as e:
+        print(f"✗ Failed to initialize: {e}")
+        return False
+    
+    # Check status
+    print("\n2. Checking digitizer status...")
+    status = digitizer.get_status()
+    print(f"   Connected: {status['connected']}")
+    print(f"   Kernel module loaded: {status['kernel_module']}")
+    print(f"   Config file exists: {status['config_exists']}")
+    
+    if not status['connected']:
+        print("\n⚠ Digitizer not connected!")
+        print("   Check:")
+        print("   1. USB cable connected?")
+        print("   2. Kernel module loaded? Run: lsmod | grep CAEN")
+        print("   3. USB device present? Run: lsusb | grep -i caen")
+        return False
+    
+    if not status['kernel_module']:
+        print("\n⚠ Kernel module not loaded!")
+        print("   Run: source sourceatstart.sh")
+        return False
+    
+    # Configure for short test
+    print("\n3. Configuring for test acquisition...")
+    try:
+        digitizer.configure(
+            run_duration=5,      # 5 second test
+            channels=[2, 3, 4],  # PMT1, PMT2, PMT3
+            record_length=1024   # Optional: override record length
+        )
+        print("✓ Configuration written")
+    except Exception as e:
+        print(f"✗ Configuration failed: {e}")
+        return False
+    
+    # Test acquisition
+    print("\n4. Running test acquisition (5 seconds)...")
+    print("   (WaveDump will run, you should see its output)")
+    
+    try:
+        success = digitizer.acquire(timeout=15)
+        
+        if success:
+            print("✓ Acquisition completed successfully")
+        else:
+            print("✗ Acquisition failed")
+            return False
+            
+    except Exception as e:
+        print(f"✗ Acquisition error: {e}")
+        return False
+    
+    # Check for waveform files
+    print("\n5. Checking for waveform files...")
+    waveforms = digitizer.get_all_waveforms([2, 3, 4])
+    
+    for ch, waveform in waveforms.items():
+        time_data, adc_data = waveform
+        print(f"   Ch{ch}: {len(time_data)} samples, "
+              f"mean ADC = {adc_data.mean():.1f}")
+    
+    if not waveforms:
+        print("   ⚠ No waveform files found!")
+        print("   Check if wave*.txt files were created")
+        return False
+    
+    # Test file organization
+    print("\n6. Testing file organization...")
+    try:
+        save_path = digitizer.organize_files(
+            save_dir="/home/hyperkaus/WaveDumpSaves/test_acquisition",
+            prefix="test",
+            channels=[2, 3, 4],
+            include_timestamp=True
+        )
+        print(f"✓ Files organized to: {save_path}")
+    except Exception as e:
+        print(f"✗ File organization failed: {e}")
+        return False
+    
+    # Cleanup
+    print("\n7. Cleaning up temporary files...")
+    digitizer.cleanup_temp_files()
+    print("✓ Cleanup complete")
+    
+    print("\n" + "=" * 60)
+    print("✓ ALL TESTS PASSED!")
+    print("=" * 60)
+    print(f"\nData saved to: {save_path}")
+    
+    return True
+
+if __name__ == "__main__":
+    success = main()
+    sys.exit(0 if success else 1)

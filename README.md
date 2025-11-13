@@ -147,6 +147,58 @@ HKAus-precal-control/
     └── DEPLOYMENT.md
 ```
 
+## File structure
+
+```
+HKAus-precal-control/
+├── README.md
+├── docs
+│   ├── API_REFERENCE.md
+│   ├── ARCHITECTURE.md
+│   └── DEVICE_SPECIFICATIONS.md
+├── linux
+│   ├── xArm-Python-SDK
+│   │   └── xarm
+│   ├── api_client
+│   │   └── device_api_client.py
+│   ├── configs
+│   │   ├── config_source_deployment.txt
+│   │   └── dark_current_config.txt
+│   ├── drivers
+│   │   └── xarm_DAQ_minimal.py
+│   ├── scripts
+│   │   └── test_api_client.py
+│   ├── gui
+│   │   └── hyperk_daq_gui_v4.py
+│   ├── README.md
+│   └── requirements.txt
+└── windows
+    ├── api_server
+    │   └── device_api_server.py
+    ├── drivers
+    │   ├── caen_dt5533e.py
+    │   ├── __init__.py
+    │   ├── laser_tama.py
+    │   ├── phidget_sensors.py
+    │   └── siggen_sdg1032x.py
+    ├── LSB-200
+    │   ├── app
+    │   └── manuals
+    ├── pysdg1032x
+    │   ├── dist
+    │   ├── LICENSE.md
+    │   ├── pyproject.toml
+    │   ├── README.md
+    │   ├── setup.cfg
+    │   └── src
+    ├── README.md
+    ├── requirements32.txt
+    └── scripts
+        ├── test_caen.py
+        ├── test_laser.py
+        └── test_siggen.py
+```
+
 ## Configuration
 
 ### Network Setup
