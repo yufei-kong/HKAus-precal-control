@@ -16,13 +16,26 @@ import numpy as np
 import json
 import sys
 import os
+from pathlib import Path
+
+# Add paths
+script_dir = Path(__file__).parent  # gui/
+linux_dir = script_dir.parent        # linux/
+
+# Add linux directory to path so we can do "import drivers.xxx"
+sys.path.insert(0, str(linux_dir))
 
 # Add xArm SDK to path
-script_dir = os.path.dirname(os.path.abspath(__file__))
-linux_dir = os.path.dirname(script_dir)  # Go up to linux/ folder
-xarm_sdk_path = os.path.join(linux_dir, "xArm-Python-SDK")
-if xarm_sdk_path not in sys.path:
-    sys.path.insert(0, xarm_sdk_path)
+xarm_sdk_path = linux_dir / "xArm-Python-SDK"
+sys.path.insert(0, str(xarm_sdk_path))
+
+# Try to import digitizer
+try:
+    from drivers.caen_digitizer_wavedump import CAENDigitizerWaveDump
+    DIGITIZER_AVAILABLE = True
+except ImportError as e:
+    DIGITIZER_AVAILABLE = False
+    print(f"⚠ Digitizer driver not available: {e}")
 
 # Page config
 st.set_page_config(
@@ -292,43 +305,67 @@ def get_sequence_list():
     else:
         return default_sequences + ["Create New Custom Scan..."]
 
-# Initialize hardware (add this section)
-if 'system' not in st.session_state and not st.session_state.get('mock_mode', False):
-    try:
-        # Import required modules
-        from xarm.wrapper import XArmAPI
-        from drivers.xarm_pmt_controller import XArmPMTController
-        from drivers.caen_digitizer_wavedump import CAENDigitizerWaveDump
-        from drivers.system_coordinator import HyperKSystemCoordinator
-        from api_client.device_api_client import WindowsDeviceClient
+# # Initialize hardware (add this section)
+# if 'system' not in st.session_state and not st.session_state.get('mock_mode', False):
+#     try:
+#         # Import required modules
+#         from xarm.wrapper import XArmAPI
+#         from drivers.xarm_pmt_controller import XArmPMTController
+#         from drivers.caen_digitizer_wavedump import CAENDigitizerWaveDump
+#         from drivers.system_coordinator import HyperKSystemCoordinator
+#         from api_client.device_api_client import WindowsDeviceClient
         
-        # Connect to robot
-        arm = XArmAPI('192.168.1.xxx')  # ← YOUR ROBOT IP HERE
-        arm.connect()
+#         # Connect to robot
+#         arm = XArmAPI('192.168.1.xxx')  # ← YOUR ROBOT IP HERE
+#         arm.connect()
         
-        # Initialize digitizer
-        digitizer = CAENDigitizerWaveDump(
-            wavedump_path="/usr/local/bin/WaveDump",
-            config_template="configs/WaveDumpConfig_template.txt"
-        )
+#         # Initialize digitizer
+#         digitizer = CAENDigitizerWaveDump(
+#             wavedump_path="/usr/local/bin/WaveDump",
+#             config_template="configs/WaveDumpConfig_template.txt"
+#         )
         
-        # Initialize robot controller
-        robot = XArmPMTController(arm=arm, digitizer=digitizer)
+#         # Initialize robot controller
+#         robot = XArmPMTController(arm=arm, digitizer=digitizer)
         
-        # Initialize API client for Windows devices
-        api_client = WindowsDeviceClient("192.168.0.186")  # ← YOUR WINDOWS IP HERE
+#         # Initialize API client for Windows devices
+#         api_client = WindowsDeviceClient("192.168.0.186")  # ← YOUR WINDOWS IP HERE
         
-        # Create system coordinator
-        st.session_state.system = HyperKSystemCoordinator(
-            robot_controller=robot,
-            api_client=api_client
-        )
+#         # Create system coordinator
+#         st.session_state.system = HyperKSystemCoordinator(
+#             robot_controller=robot,
+#             api_client=api_client
+#         )
         
-        st.success("✓ All systems initialized")
+#         st.success("✓ All systems initialized")
         
-    except Exception as e:
-        st.error(f"Initialization failed: {e}")
-        st.session_state.system = None
+#     except Exception as e:
+#         st.error(f"Initialization failed: {e}")
+#         st.session_state.system = None
+
+# Initialize digitizer
+if 'digitizer' not in st.session_state:
+    if DIGITIZER_AVAILABLE:
+        try:
+            digitizer = CAENDigitizerWaveDump(
+                wavedump_path="/home/hyperkaus/CAEN/wavedump-3.10.6-augmented/src/wavedump",
+                config_template="./configs/wavedumpconfig_template.txt",
+                working_dir="."
+            )
+            st.session_state.digitizer = digitizer
+            st.session_state.digitizer_connected = True
+            st.session_state.digitizer_status = digitizer.get_status()
+        except Exception as e:
+            st.session_state.digitizer = None
+            st.session_state.digitizer_connected = False
+            st.session_state.digitizer_error = str(e)
+    else:
+        st.session_state.digitizer = None
+        st.session_state.digitizer_connected = False
+
+# Initialize acquisition state
+if 'last_acquisition' not in st.session_state:
+    st.session_state.last_acquisition = None
 
 # Initialize session state
 if 'authenticated' not in st.session_state:
@@ -461,6 +498,19 @@ with st.sidebar:
     if not robot_ready:
         st.caption(f"  ↳ At {st.session_state.robot_position}")
     
+    # Digitizer Status
+    if st.session_state.get('digitizer_connected', False):
+        status = st.session_state.get('digitizer_status', {})
+        if status.get('connected') and status.get('kernel_module'):
+            st.markdown(f"{status_dot('green')} CAEN Digitizer", unsafe_allow_html=True)
+        elif status.get('connected'):
+            st.markdown(f"{status_dot('yellow')} CAEN Digitizer", unsafe_allow_html=True)
+            st.caption("  ↳ Module not loaded")
+        else:
+            st.markdown(f"{status_dot('red')} CAEN Digitizer", unsafe_allow_html=True)
+    else:
+        st.markdown(f"{status_dot('grey')} CAEN Digitizer", unsafe_allow_html=True)
+
     st.markdown("---")
     
     # Emergency Stop with confirmation
@@ -943,87 +993,249 @@ if st.session_state.mode == "Setup & Monitor":
         
         st.info("ℹ️ Manual position control removed for safety with PMT present")
     
-    # TAB 6: DAQ Control
+    # TAB 6: Manual Acquisition
     with tabs[5]:
-        st.subheader("WaveDump DAQ Control")
+        st.subheader("Manual Data Acquisition")
         
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("**Configuration:**")
+        if not st.session_state.get('digitizer_connected', False):
+            st.error("❌ Digitizer not connected - cannot acquire data")
+            st.info("Check digitizer status in System Status tab")
+        else:
+            # Check if digitizer is ready
+            status = st.session_state.digitizer_status
+            digitizer_ready = status['connected'] and status['kernel_module']
             
-            # Config file with inline editing
-            config_file = st.text_input("Config File Path:", 
-                                       value="/home/hyperk/configs/WaveDumpConfig.txt",
-                                       key="daq_config_path")
+            if not digitizer_ready:
+                st.warning("⚠ Digitizer not ready")
+                if not status['kernel_module']:
+                    st.error("Kernel module not loaded. Run: `source sourceatstart.sh`")
+                if not status['connected']:
+                    st.error("USB device not detected. Check connection.")
             
-            if st.button("📝 Edit Config File", use_container_width=True):
-                st.session_state.show_config_editor = True
+            # Configuration
+            col1, col2 = st.columns(2)
             
-            # Inline config editor
-            if hasattr(st.session_state, 'show_config_editor') and st.session_state.show_config_editor:
-                st.markdown("---")
-                st.markdown("**Config File Editor:**")
-                config_text = st.text_area(
-                    "Edit configuration:",
-                    value="""# WaveDump Configuration
-OPEN USB 0 0
-RECORD_LENGTH 1024
-POST_TRIGGER 512
-TRIGGER_MODE EXTERNAL
-ENABLE_INPUT 1""",
-                    height=200,
-                    key="config_editor"
+            with col1:
+                st.markdown("**Acquisition Settings:**")
+                
+                acq_duration = st.number_input(
+                    "Duration (seconds)",
+                    min_value=1,
+                    max_value=3600,
+                    value=5,
+                    step=1,
+                    key="manual_acq_duration"
                 )
                 
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    if st.button("💾 Save", key="config_save"):
-                        st.success("Configuration saved!")
-                        st.session_state.show_config_editor = False
-                        st.rerun()
-                with col_b:
-                    if st.button("✖ Cancel", key="config_cancel"):
-                        st.session_state.show_config_editor = False
-                        st.rerun()
+                # Channel selection
+                available_channels = {
+                    0: "Ch0 (Trigger)",
+                    1: "Ch1 (SiPM)",
+                    2: "Ch2 (PMT1)",
+                    3: "Ch3 (PMT2)",
+                    4: "Ch4 (PMT3/Monitor)",
+                    5: "Ch5",
+                    6: "Ch6",
+                    7: "Ch7"
+                }
+                
+                channels = st.multiselect(
+                    "Channels to Record",
+                    options=list(available_channels.keys()),
+                    default=[2, 3, 4],
+                    format_func=lambda x: available_channels[x],
+                    key="manual_acq_channels"
+                )
+                
+                record_length = st.number_input(
+                    "Record Length (samples)",
+                    min_value=128,
+                    max_value=8192,
+                    value=1024,
+                    step=128,
+                    key="manual_record_length"
+                )
             
-            # Runtime instead of number of events
-            runtime = st.number_input("Runtime (seconds)", 
-                                     min_value=1, 
-                                     max_value=86400,  # 24 hours max
-                                     value=300, 
-                                     step=60,
-                                     key="daq_runtime")
-            
-            output_dir = st.text_input("Output Directory:", 
-                                      value="/data/runs/",
-                                      key="daq_output")
-        
-        with col2:
-            st.markdown("**Status & Monitoring:**")
-            
-            if st.session_state.run_active:
-                st.markdown(f"{status_dot('green')} DAQ Running", unsafe_allow_html=True)
-            else:
-                st.markdown(f"{status_dot('grey')} DAQ Idle", unsafe_allow_html=True)
-            
-            st.metric("Events Recorded", "15,420" if st.session_state.run_active else "0")
-            st.metric("Elapsed Time", "145 s" if st.session_state.run_active else "0 s")
-            st.metric("Event Rate", "106 Hz" if st.session_state.run_active else "0 Hz")
+            with col2:
+                st.markdown("**Trigger Settings:**")
+                
+                trigger_channel = st.selectbox(
+                    "Trigger Channel",
+                    options=list(available_channels.keys()),
+                    index=4,  # Default to Ch4
+                    format_func=lambda x: available_channels[x],
+                    key="manual_trigger_ch"
+                )
+                
+                trigger_threshold = st.number_input(
+                    "Trigger Threshold (ADC counts)",
+                    min_value=1,
+                    max_value=4095,
+                    value=1,
+                    step=1,
+                    help="Lower = more sensitive",
+                    key="manual_trigger_thresh"
+                )
+                
+                trigger_mode = st.selectbox(
+                    "Trigger Mode",
+                    options=["ACQUISITION_ONLY", "ACQUISITION_AND_TRGOUT", "DISABLED"],
+                    index=0,
+                    key="manual_trigger_mode"
+                )
             
             st.markdown("---")
+            st.markdown("**Output Settings:**")
             
-            col_a, col_b = st.columns(2)
+            output_dir = st.text_input(
+                "Output Directory",
+                value="../WaveDumpSaves/manual_acquisition",
+                key="manual_output_dir",
+                help="Where to save organized files"
+            )
+            
+            file_prefix = st.text_input(
+                "File Prefix",
+                value="manual",
+                key="manual_file_prefix",
+                help="Prefix for saved files"
+    )
+            
+            # Acquisition controls
+            col_a, col_b, col_c = st.columns([2, 1, 1])
+            
             with col_a:
-                if st.button("▶ Start", use_container_width=True, key="daq_start"):
-                    st.session_state.run_active = True
-                    st.success("DAQ started!")
-                    st.rerun()
+                if st.button(
+                    "▶ Start Acquisition",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=not digitizer_ready or st.session_state.run_active,
+                    key="start_manual_acq"
+                ):
+                    if digitizer_ready and channels:
+                        with st.spinner(f"Acquiring data for {acq_duration}s..."):
+                            try:
+                                # Configure digitizer
+                                st.session_state.digitizer.configure(
+                                    run_duration=acq_duration,
+                                    channels=channels,
+                                    trigger_channel=trigger_channel,
+                                    trigger_threshold=trigger_threshold,
+                                    channel_trigger_mode=trigger_mode,
+                                    record_length=record_length
+                                )
+                                
+                                # Acquire data
+                                success = st.session_state.digitizer.acquire(
+                                    timeout=acq_duration + 30,
+                                    show_output=False  # Don't show WaveDump output in GUI
+                                )
+                                
+                                if success:
+                                    # Check what files were created (before organizing)
+                                    waveform_files = st.session_state.digitizer.get_all_waveforms(channels)
+                                    num_files = len(waveform_files)
+                                    
+                                    # Organize files
+                                    try:
+                                        # Use prefix or default to "data" if empty
+                                        prefix = file_prefix.strip() if file_prefix.strip() else "data"
+                                        
+                                        save_path = st.session_state.digitizer.organize_files(
+                                            save_dir=output_dir,
+                                            prefix=prefix,
+                                            channels=channels,
+                                            include_timestamp=True
+                                        )
+                                        
+                                        # Save info about acquisition
+                                        st.session_state.last_acquisition = {
+                                            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                            'duration': acq_duration,
+                                            'channels': channels,
+                                            'num_files': num_files,
+                                            'save_path': save_path,
+                                            'prefix': prefix
+                                        }
+                                        
+                                        st.success(f"✓ Acquisition complete! Files saved to:")
+                                        st.code(str(save_path))
+                                        
+                                        # Show organized files (use new paths)
+                                        for ch in channels:
+                                            filename = f"{prefix}_wave{ch}.txt"
+                                            st.text(f"  Ch{ch}: {filename}")
+                                        
+                                    except Exception as e:
+                                        st.error(f"File organization failed: {e}")
+                                        import traceback
+                                        st.text(traceback.format_exc())
+                                    
+                                    # Update digitizer status
+                                    st.session_state.digitizer_status = st.session_state.digitizer.get_status()
+                                    
+                                else:
+                                    st.error("❌ Acquisition failed - check WaveDump output")
+                            
+                            except Exception as e:
+                                st.error(f"❌ Acquisition error: {e}")
+                                import traceback
+                                st.text(traceback.format_exc())
+                    else:
+                        if not channels:
+                            st.error("⚠ Please select at least one channel")
+            
             with col_b:
-                if st.button("⏹ Stop", use_container_width=True, key="daq_stop"):
-                    st.session_state.run_active = False
-                    st.info("DAQ stopped")
+                if st.button(
+                    "🗑️ Clear Files",
+                    use_container_width=True,
+                    help="Remove temporary wave*.txt files",
+                    key="clear_wave_files"
+                ):
+                    try:
+                        st.session_state.digitizer.cleanup_temp_files()
+                        st.success("✓ Temporary files cleared")
+                    except Exception as e:
+                        st.error(f"Cleanup error: {e}")
+            
+            with col_c:
+                if st.button(
+                    "🔄 Refresh",
+                    use_container_width=True,
+                    key="refresh_daq_tab"
+                ):
+                    st.session_state.digitizer_status = st.session_state.digitizer.get_status()
                     st.rerun()
+            
+            # Show last acquisition details
+            if st.session_state.last_acquisition:
+                st.markdown("---")
+                st.markdown("### Last Acquisition Results")
+                
+                last_acq = st.session_state.last_acquisition
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Time", last_acq['timestamp'].split()[1])
+                with col2:
+                    st.metric("Duration", f"{last_acq['duration']}s")
+                with col3:
+                    st.metric("Channels", len(last_acq['channels']))
+                with col4:
+                    st.metric("Files", last_acq['num_files'])
+                
+                # Show file details in expander
+                with st.expander("📁 View File Details"):
+                    st.text(f"Saved to: {last_acq['save_path']}")
+                    st.text(f"Prefix: {last_acq['prefix']}")
+                    st.text(f"Channels: {', '.join(map(str, last_acq['channels']))}")
+                    st.text(f"\nFiles:")
+                    for ch in last_acq['channels']:
+                        filename = f"{last_acq['prefix']}_wave{ch}.txt"
+                        st.text(f"  • {filename}")
+                
+                # Note about analysis
+                st.info("💡 Use wavepro or other offline tools to analyze waveforms")
 
 else:
     # ========================================================================
