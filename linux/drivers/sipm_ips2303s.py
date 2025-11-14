@@ -148,9 +148,24 @@ class IPS2303s():
         except:
             return 0.0
     
+    def get_output_status(self):
+        """
+        Check if output is ON by trying to read voltage.
+        If we can read voltage, output is likely on.
+        """
+        try:
+            # Try to read output - if it responds, we're connected
+            v = self.sendCmd('VOUT1?')
+            if v and len(v) > 0:
+                return True
+            return False
+        except:
+            return False
+
     def get_status(self):
         """
         Get device status for GUI display.
+        Uses individual queries instead of STATUS? command.
         
         Returns:
             Dictionary with connection and output status
@@ -159,17 +174,24 @@ class IPS2303s():
             return {'connected': False}
         
         try:
-            sys_status = self.systemStatus()
+            # Check if we can communicate
+            v1 = self.get_voltage(1)
+            
+            # If voltage > 0.1V, output is probably on
+            output_on = v1 > 0.1
+            
             return {
                 'connected': True,
-                'output_on': sys_status['Output'] == '1',
-                'ch1_mode': sys_status['CH1'],
-                'ch2_mode': sys_status['CH2'],
-                'tracking': sys_status['Tracking']
+                'output_on': output_on,
+                'ch1_v': v1,
+                'ch2_v': self.get_voltage(2)
             }
         except Exception as e:
             print(f"Error getting status: {e}")
-            return {'connected': False}
+            return {
+                'connected': False,
+                'output_on': False
+            }
     
     # =======================================================================
     # Original Print Methods (for debugging)
@@ -205,22 +227,22 @@ class IPS2303s():
         err = self.sendCmd('ERR?')
         return err
     
-    def systemStatus(self):
-        """
-        Get system status.
+    # def systemStatus(self):
+    #     """
+    #     Get system status.
         
-        Returns:
-            Dictionary with status fields
-        """
-        response = self.sendCmd('STATUS?')
-        resp = {}
-        resp['CH1'] = response[0]
-        resp['CH2'] = response[1]
-        resp['Tracking'] = response[2:4]
-        resp['Beep'] = response[4]
-        resp['Output'] = response[6]
-        resp['BaudRate'] = response[7]
-        return resp
+    #     Returns:
+    #         Dictionary with status fields
+    #     """
+    #     response = self.sendCmd('STATUS?')
+    #     resp = {}
+    #     resp['CH1'] = response[0]
+    #     resp['CH2'] = response[1]
+    #     resp['Tracking'] = response[2:4]
+    #     resp['Beep'] = response[4]
+    #     resp['Output'] = response[6]
+    #     resp['BaudRate'] = response[7]
+    #     return resp
 
 
 # =======================================================================

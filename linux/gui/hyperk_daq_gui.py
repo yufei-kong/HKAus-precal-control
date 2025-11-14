@@ -771,21 +771,36 @@ if st.session_state.mode == "Setup & Monitor":
             with col1:
                 st.markdown("**Channel 1:**")
                 
-                # These are just for display/reference - actual settings done via hardware
-                st.text("Set Voltage: 5.0 V")
-                st.text("Set Current: 1.0 A")
+                # Get actual setpoints from hardware
+                try:
+                    set_v1 = st.session_state.sipm_supply.get_voltage_setpoint(1)
+                    set_i1 = st.session_state.sipm_supply.get_current_setpoint(1)
+                except:
+                    set_v1 = 5.0
+                    set_i1 = 1000.0
+                
+                st.text(f"Set Voltage: {set_v1:.2f} V")
+                st.text(f"Set Current: {set_i1:.3f} A")
                 
                 st.metric("Measured V", f"{ch1_v:.3f} V")
-                st.metric("Measured I", f"{ch1_i:.2f} mA")
-            
+                st.metric("Measured I", f"{ch1_i*1000:.2f} mA")  # Convert A to mA
+
             with col2:
                 st.markdown("**Channel 2:**")
                 
-                st.text("Set Voltage: 5.0 V")
-                st.text("Set Current: 1.0 A")
+                # Get actual setpoints from hardware
+                try:
+                    set_v2 = st.session_state.sipm_supply.get_voltage_setpoint(2)
+                    set_i2 = st.session_state.sipm_supply.get_current_setpoint(2)
+                except:
+                    set_v2 = 5.0
+                    set_i2 = 1000.0
+                
+                st.text(f"Set Voltage: {set_v2:.2f} V")
+                st.text(f"Set Current: {set_i2:.3f} A")
                 
                 st.metric("Measured V", f"{ch2_v:.3f} V")
-                st.metric("Measured I", f"{ch2_i:.2f} mA")
+                st.metric("Measured I", f"{ch2_i*1000:.2f} mA")  # Convert A to mA
             
             with col3:
                 st.markdown("**Output Control:**")
@@ -841,25 +856,21 @@ if st.session_state.mode == "Setup & Monitor":
             # Optional: Show system status
             with st.expander("📊 System Status Details"):
                 try:
-                    sys_status = st.session_state.sipm_supply.systemStatus()
+                    status = st.session_state.sipm_supply.get_status()
+                    
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.text(f"CH1 Mode: {sys_status['CH1']}")
-                        st.text(f"CH2 Mode: {sys_status['CH2']}")
-                        st.text(f"Tracking: {sys_status['Tracking']}")
+                        st.text(f"CH1 Voltage: {status.get('ch1_v', 0):.3f} V")
+                        st.text(f"CH2 Voltage: {status.get('ch2_v', 0):.3f} V")
                     with col2:
-                        st.text(f"Beep: {sys_status['Beep']}")
-                        st.text(f"Output: {'ON' if sys_status['Output'] == '1' else 'OFF'}")
-                        st.text(f"Baud Rate: {sys_status['BaudRate']}")
+                        st.text(f"Output: {'ON' if status.get('output_on') else 'OFF'}")
+                        st.text(f"Connected: {'Yes' if status.get('connected') else 'No'}")
                 except Exception as e:
                     st.error(f"Could not read status: {e}")
-            
-            st.caption("ℹ️ Voltage and current setpoints are configured on the device hardware")
-            st.caption("ℹ️ This interface controls output ON/OFF only")
-    
-    # TAB 3: Signal Generator
-    with tabs[2]:
-        st.subheader("Siglent SDG2122X Signal Generator")
+                
+                # TAB 3: Signal Generator
+                with tabs[2]:
+                    st.subheader("Siglent SDG2122X Signal Generator")
         
         col1, col2 = st.columns(2)
         
