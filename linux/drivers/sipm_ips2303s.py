@@ -181,15 +181,16 @@ class IPS2303s():
         try:
             # Check if we can communicate
             v1 = self.get_voltage(1)
+            v2 = self.get_voltage(2)
             
             # If voltage > 0.1V, output is probably on
-            output_on = v1 > 0.1
+            output_on = v2 > 0.1
             
             return {
                 'connected': True,
                 'output_on': output_on,
                 'ch1_v': v1,
-                'ch2_v': self.get_voltage(2)
+                'ch2_v': v2
             }
         except Exception as e:
             print(f"Error getting status: {e}")
