@@ -6,6 +6,7 @@ Based on original Operate.py with additions for GUI integration
 import serial
 import time 
 import os
+import re
 
 class IPS2303s():
     """
@@ -110,6 +111,7 @@ class IPS2303s():
         """
         try:
             response = self.sendCmd(f"VOUT{int(ch)}?")
+            response = re.findall(r'[0-9.]+|\D', response)[0]
             return float(response)
         except Exception as e:
             print(f"Error reading voltage Ch{ch}: {e}")
@@ -127,6 +129,7 @@ class IPS2303s():
         """
         try:
             response = self.sendCmd(f"IOUT{int(ch)}?")
+            response = re.findall(r'[0-9.]+|\D', response)[0]
             return float(response)
         except Exception as e:
             print(f"Error reading current Ch{ch}: {e}")
@@ -136,6 +139,7 @@ class IPS2303s():
         """Get voltage setpoint for channel"""
         try:
             response = self.sendCmd(f"VSET{int(ch)}?")
+            response = re.findall(r'[0-9.]+|\D', response)[0]
             return float(response)
         except:
             return 0.0
@@ -144,6 +148,7 @@ class IPS2303s():
         """Get current limit setpoint for channel"""
         try:
             response = self.sendCmd(f"ISET{int(ch)}?")
+            response = re.findall(r'[0-9.]+|\D', response)[0]
             return float(response)
         except:
             return 0.0
