@@ -264,8 +264,10 @@ if __name__ == '__main__':
         print("\nConnecting to device...")
         device = IPS2303s()
         
-        print("\nSystem Status:")
-        print(device.systemStatus())
+        print("\nDevice Status:")
+        status = device.get_status()
+        print(f"  Connected: {status['connected']}")
+        print(f"  Output ON: {status['output_on']}")
         
         print("\nChannel Readings:")
         device.vGet(1)
@@ -277,7 +279,7 @@ if __name__ == '__main__':
         print(f"Ch1: {device.get_voltage(1):.3f} V, {device.get_current(1)*1000:.2f} mA")
         print(f"Ch2: {device.get_voltage(2):.3f} V, {device.get_current(2)*1000:.2f} mA")
         
-        print("\nConnection successful!")
+        print("\n✓ Connection successful!")
         
         device.close()
         
