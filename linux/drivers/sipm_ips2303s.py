@@ -109,12 +109,24 @@ class IPS2303s():
         Returns:
             Voltage as float (V)
         """
-        try:
-            response = self.sendCmd(f"VOUT{int(ch)}?")
-            response = re.findall(r'[0-9.]+|\D', response)[0]
-            return float(response)
-        except Exception as e:
-            print(f"Error reading voltage Ch{ch}: {e}")
+        for attempt in range(2):
+            try:
+                response = self.sendCmd(f"VOUT{int(ch)}?")
+                response = re.findall(r'[0-9.]+|\D', response)[0]
+                return float(response)
+            except Exception as e:
+                print(f"Attempt {attempt + 1}: Error reading voltage Ch{ch}: {e}")
+                if attempt == 1: # If it's the last attempt and it failed
+                    print("All attempts failed. Handling the final exception.")
+                    return 0.0
+                    # Perform final error handling here
+                else:
+                    print("Retrying...")
+
+        else:
+            # This 'else' block executes if the loop completes without a 'break'
+            # meaning all attempts failed.
+            print("Operation failed after all retries.")
             return 0.0
     
     def get_current(self, ch):
