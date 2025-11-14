@@ -772,8 +772,8 @@ if st.session_state.mode == "Setup & Monitor":
                 st.markdown("**Channel 1:**")
                 
                 # These are just for display/reference - actual settings done via hardware
-                st.text("Set Voltage: 3.3 V")
-                st.text("Set Current: 50 mA")
+                st.text("Set Voltage: 5.0 V")
+                st.text("Set Current: 1.0 A")
                 
                 st.metric("Measured V", f"{ch1_v:.3f} V")
                 st.metric("Measured I", f"{ch1_i:.2f} mA")
@@ -781,8 +781,8 @@ if st.session_state.mode == "Setup & Monitor":
             with col2:
                 st.markdown("**Channel 2:**")
                 
-                st.text("Set Voltage: 3.3 V")
-                st.text("Set Current: 50 mA")
+                st.text("Set Voltage: 5.0 V")
+                st.text("Set Current: 1.0 A")
                 
                 st.metric("Measured V", f"{ch2_v:.3f} V")
                 st.metric("Measured I", f"{ch2_i:.2f} mA")
