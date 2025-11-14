@@ -23,6 +23,8 @@ Usage:
     laser.disconnect()
 """
 
+#Author: Wi Han Ng <wihann@student.unimelb.edu.au>
+
 from typing import Optional, Dict, Any
 from loguru import logger
 import sys
