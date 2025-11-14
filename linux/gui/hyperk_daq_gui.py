@@ -868,9 +868,9 @@ if st.session_state.mode == "Setup & Monitor":
                 except Exception as e:
                     st.error(f"Could not read status: {e}")
                 
-                # TAB 3: Signal Generator
-                with tabs[2]:
-                    st.subheader("Siglent SDG2122X Signal Generator")
+    # TAB 3: Signal Generator
+    with tabs[2]:
+        st.subheader("Siglent SDG2122X Signal Generator")
         
         col1, col2 = st.columns(2)
         
