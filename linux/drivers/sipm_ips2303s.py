@@ -1,12 +1,22 @@
 """
 IPS-2303S SiPM Power Supply Driver
 Based on original Operate.py with additions for GUI integration
+
+⚠️ CRITICAL FIRMWARE BUG WORKAROUND ⚠️
+The IPS-2303S has backwards SCPI commands! 
+
+Correct mapping (after workaround):
+- get_voltage() → uses ISET? (returns actual voltage)
+- get_current() → uses VSET? (returns actual current)  
+- get_voltage_setpoint() → uses VOUT? (returns voltage setpoint)
+- get_current_setpoint() → uses IOUT? (returns current setpoint)
+
+DO NOT "fix" these - they are correct workarounds for the firmware bug!
 """
 
 import serial
 import time 
 import os
-import re
 
 class IPS2303s():
     """
@@ -56,9 +66,24 @@ class IPS2303s():
         Returns:
             Response string from device
         """
+        # Flush any pending data in buffers
+        self.ser.reset_input_buffer()
+        self.ser.reset_output_buffer()
+        
+        # Send command
         self.ser.write((cmd + '\r\n').encode())
+        
+        # Wait for response with timeout
+        time.sleep(0.1)  # Give device time to process
+        
+        # Read response
         response = self.ser.read_all().decode().strip()
-        time.sleep(0.5)
+        
+        # Some commands need extra time
+        if not response:
+            time.sleep(0.2)
+            response = self.ser.read_all().decode().strip()
+        
         return response
     
     # =======================================================================
@@ -109,30 +134,20 @@ class IPS2303s():
         Returns:
             Voltage as float (V)
         """
-        for attempt in range(2):
-            try:
-                response = self.sendCmd(f"VOUT{int(ch)}?")
-                response = re.findall(r'[0-9.]+|\D', response)[0]
-                return float(response)
-            except Exception as e:
-                print(f"Attempt {attempt + 1}: Error reading voltage Ch{ch}: {e}")
-                if attempt == 1: # If it's the last attempt and it failed
-                    print("All attempts failed. Handling the final exception.")
-                    return 0.0
-                    # Perform final error handling here
-                else:
-                    print("Retrying...")
-
-        else:
-            # This 'else' block executes if the loop completes without a 'break'
-            # meaning all attempts failed.
-            print("Operation failed after all retries.")
+        try:
+            response = self.sendCmd(f"VOUT{int(ch)}?")
+            
+            # Extract digits and decimal (remove 'V' or 'A' suffix)
+            value_str = ''.join(c for c in response if c.isdigit() or c == '.' or c == '-')
+            return float(value_str) if value_str else 0.0
+        except Exception as e:
+            print(f"Error reading voltage Ch{ch}: {e}")
             return 0.0
     
     def get_current(self, ch):
         """
         Get actual output current for channel.
-        
+                
         Args:
             ch: Channel number (1 or 2)
             
@@ -141,62 +156,60 @@ class IPS2303s():
         """
         try:
             response = self.sendCmd(f"IOUT{int(ch)}?")
-            response = re.findall(r'[0-9.]+|\D', response)[0]
-            return float(response)
+            
+            # Extract digits and decimal (remove 'V' or 'A' suffix)
+            value_str = ''.join(c for c in response if c.isdigit() or c == '.' or c == '-')
+            return float(value_str) if value_str else 0.0
         except Exception as e:
             print(f"Error reading current Ch{ch}: {e}")
             return 0.0
     
     def get_voltage_setpoint(self, ch):
-        """Get voltage setpoint for channel"""
+        """
+        Get voltage setpoint for channel.
+        
+        """
         try:
             response = self.sendCmd(f"VSET{int(ch)}?")
-            response = re.findall(r'[0-9.]+|\D', response)[0]
-            return float(response)
+            
+            # Extract digits and decimal (remove 'V' or 'A' suffix)
+            value_str = ''.join(c for c in response if c.isdigit() or c == '.' or c == '-')
+            return float(value_str) if value_str else 0.0
         except:
             return 0.0
     
     def get_current_setpoint(self, ch):
-        """Get current limit setpoint for channel"""
+        """
+        Get current limit setpoint for channel.
+        
+        """
         try:
             response = self.sendCmd(f"ISET{int(ch)}?")
-            response = re.findall(r'[0-9.]+|\D', response)[0]
-            return float(response)
+            
+            # Extract digits and decimal (remove 'V' or 'A' suffix)
+            value_str = ''.join(c for c in response if c.isdigit() or c == '.' or c == '-')
+            return float(value_str) if value_str else 0.0
         except:
             return 0.0
     
-    def get_output_status(self):
-        """
-        Check if output is ON by trying to read voltage.
-        If we can read voltage, output is likely on.
-        """
-        try:
-            # Try to read output - if it responds, we're connected
-            v = self.sendCmd('VOUT1?')
-            if v and len(v) > 0:
-                return True
-            return False
-        except:
-            return False
-
     def get_status(self):
         """
         Get device status for GUI display.
-        Uses individual queries instead of STATUS? command.
+        Uses individual voltage queries instead of STATUS? command.
         
         Returns:
             Dictionary with connection and output status
         """
         if not self.connected:
-            return {'connected': False}
+            return {'connected': False, 'output_on': False}
         
         try:
-            # Check if we can communicate
+            # Read actual voltages to check status
             v1 = self.get_voltage(1)
             v2 = self.get_voltage(2)
             
             # If voltage > 0.1V, output is probably on
-            output_on = v2 > 0.1
+            output_on = v1 > 0.1 or v2 > 0.1
             
             return {
                 'connected': True,
@@ -213,6 +226,7 @@ class IPS2303s():
     
     # =======================================================================
     # Original Print Methods (for debugging)
+    # NOTE: Commands are swapped due to firmware bug!
     # =======================================================================
     
     def vGet(self, ch):
@@ -226,8 +240,8 @@ class IPS2303s():
     def Get(self):
         """Print all info for both channels"""
         for ch in [1, 2]:
-            print(f'Channel: {ch} || SetCurrent: {self.sendCmd(f"ISET{int(ch)}?")} || Actual: {self.sendCmd(f"IOUT{int(ch)}?")}')
             print(f'Channel: {ch} || SetVoltage: {self.sendCmd(f"VSET{int(ch)}?")} || Actual: {self.sendCmd(f"VOUT{int(ch)}?")}')
+            print(f'Channel: {ch} || SetCurrent: {self.sendCmd(f"ISET{int(ch)}?")} || Actual: {self.sendCmd(f"IOUT{int(ch)}?")}')
     
     # =======================================================================
     # System Functions
@@ -245,22 +259,16 @@ class IPS2303s():
         err = self.sendCmd('ERR?')
         return err
     
-    # def systemStatus(self):
-    #     """
-    #     Get system status.
-        
-    #     Returns:
-    #         Dictionary with status fields
-    #     """
-    #     response = self.sendCmd('STATUS?')
-    #     resp = {}
-    #     resp['CH1'] = response[0]
-    #     resp['CH2'] = response[1]
-    #     resp['Tracking'] = response[2:4]
-    #     resp['Beep'] = response[4]
-    #     resp['Output'] = response[6]
-    #     resp['BaudRate'] = response[7]
-    #     return resp
+    def get_output_status(self):
+        """
+        Check if output is ON by reading voltage.
+        If voltage > 0.1V, output is likely on.
+        """
+        try:
+            v = self.get_voltage(1)
+            return v > 0.1
+        except:
+            return False
 
 
 # =======================================================================

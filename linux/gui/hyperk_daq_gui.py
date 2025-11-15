@@ -17,6 +17,7 @@ import json
 import sys
 import os
 from pathlib import Path
+import atexit
 
 # Add paths
 script_dir = Path(__file__).parent  # gui/
@@ -382,6 +383,17 @@ if 'sipm_supply' not in st.session_state:
             sipm = IPS2303s(port='/dev/ttyUSB0', baud=115200)
             st.session_state.sipm_supply = sipm
             st.session_state.sipm_connected = True
+
+        # Register cleanup function
+            def cleanup_sipm():
+                try:
+                    sipm.close()
+                    print("✓ SiPM supply disconnected")
+                except:
+                    pass
+            
+            atexit.register(cleanup_sipm)
+
         except Exception as e:
             st.session_state.sipm_supply = None
             st.session_state.sipm_connected = False
