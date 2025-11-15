@@ -2,21 +2,16 @@
 IPS-2303S SiPM Power Supply Driver
 Based on original Operate.py with additions for GUI integration
 
-⚠️ CRITICAL FIRMWARE BUG WORKAROUND ⚠️
-The IPS-2303S has backwards SCPI commands! 
+NOTE: Serial communication requires proper timing!
+The sendCmd() method includes buffer flushing and delays to ensure
+reliable communication. Without this, responses can arrive out of order.
 
-Correct mapping (after workaround):
-- get_voltage() → uses ISET? (returns actual voltage)
-- get_current() → uses VSET? (returns actual current)  
-- get_voltage_setpoint() → uses VOUT? (returns voltage setpoint)
-- get_current_setpoint() → uses IOUT? (returns current setpoint)
-
-DO NOT "fix" these - they are correct workarounds for the firmware bug!
 """
 
 import serial
 import time 
 import os
+import threading
 
 class IPS2303s():
     """
@@ -40,6 +35,7 @@ class IPS2303s():
         self.port = port
         self.baud = baud
         self.connected = False
+        self._lock = threading.Lock()  # Prevent concurrent access
         
         try:
             self._readDevice(self.port, self.baud)
@@ -59,6 +55,7 @@ class IPS2303s():
     def sendCmd(self, cmd):
         """
         Send command to device and return response.
+        Thread-safe with lock to prevent concurrent access.
         
         Args:
             cmd: Command string
@@ -66,25 +63,26 @@ class IPS2303s():
         Returns:
             Response string from device
         """
-        # Flush any pending data in buffers
-        self.ser.reset_input_buffer()
-        self.ser.reset_output_buffer()
-        
-        # Send command
-        self.ser.write((cmd + '\r\n').encode())
-        
-        # Wait for response with timeout
-        time.sleep(0.1)  # Give device time to process
-        
-        # Read response
-        response = self.ser.read_all().decode().strip()
-        
-        # Some commands need extra time
-        if not response:
-            time.sleep(0.2)
+        with self._lock:  # Ensure only one command at a time
+            # Flush any pending data in buffers
+            self.ser.reset_input_buffer()
+            self.ser.reset_output_buffer()
+            
+            # Send command
+            self.ser.write((cmd + '\r\n').encode())
+            
+            # Wait for response with timeout
+            time.sleep(0.1)  # Give device time to process
+            
+            # Read response
             response = self.ser.read_all().decode().strip()
-        
-        return response
+            
+            # Some commands need extra time
+            if not response:
+                time.sleep(0.2)
+                response = self.ser.read_all().decode().strip()
+            
+            return response
     
     # =======================================================================
     # Voltage and Current Setpoints (not used in GUI - set on hardware)

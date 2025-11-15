@@ -9,6 +9,7 @@ Usage:
 """
 
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 import time
 from datetime import datetime, timedelta
 import pandas as pd
@@ -44,6 +45,12 @@ try:
 except ImportError as e:
     SIPM_AVAILABLE = False
     print(f"⚠ SiPM driver not available: {e}")
+
+# ============================================================================
+# MODULE-LEVEL GLOBALS (for cleanup without Streamlit context)
+# ============================================================================
+_sipm_supply = None
+_digitizer = None
 
 # Page config
 st.set_page_config(
@@ -363,6 +370,9 @@ if 'digitizer' not in st.session_state:
             st.session_state.digitizer = digitizer
             st.session_state.digitizer_connected = True
             st.session_state.digitizer_status = digitizer.get_status()
+
+            _digitizer = digitizer
+
         except Exception as e:
             st.session_state.digitizer = None
             st.session_state.digitizer_connected = False
@@ -384,15 +394,8 @@ if 'sipm_supply' not in st.session_state:
             st.session_state.sipm_supply = sipm
             st.session_state.sipm_connected = True
 
-        # Register cleanup function
-            def cleanup_sipm():
-                try:
-                    sipm.close()
-                    print("✓ SiPM supply disconnected")
-                except:
-                    pass
-            
-            atexit.register(cleanup_sipm)
+            # Store globally for cleanup
+            _sipm_supply = sipm
 
         except Exception as e:
             st.session_state.sipm_supply = None
@@ -452,6 +455,45 @@ if 'laser_trigger_mode' not in st.session_state:
     st.session_state.laser_trigger_mode = "EXT"
 if 'selected_sequence' not in st.session_state:
     st.session_state.selected_sequence = "Dark Current Check (5 min)"
+
+if 'cleanup_registered' not in st.session_state:
+    
+    def cleanup_devices():
+        """Cleanup devices on exit"""
+        global _sipm_supply, _digitizer
+        
+        print("\n" + "="*60)
+        print("SHUTTING DOWN - Cleaning up devices...")
+        print("="*60)
+        
+        cleaned = []
+        
+        if _sipm_supply is not None:
+            try:
+                _sipm_supply.OFF()
+                _sipm_supply.close()
+                cleaned.append("✓ SiPM supply: Output OFF, connection closed")
+            except Exception as e:
+                cleaned.append(f"⚠ SiPM: {e}")
+        
+        if _digitizer is not None:
+            try:
+                _digitizer.cleanup_temp_files()
+                cleaned.append("✓ Digitizer: Cleaned")
+            except Exception as e:
+                cleaned.append(f"⚠ Digitizer: {e}")
+        
+        if cleaned:
+            for msg in cleaned:
+                print(f"  {msg}")
+        
+        print("="*60)
+        print("Cleanup complete. Safe to exit.")
+        print("="*60 + "\n")
+        sys.stdout.flush()
+    
+    atexit.register(cleanup_devices)
+    st.session_state.cleanup_registered = True
 
 # ============================================================================
 # SIDEBAR
@@ -630,6 +672,13 @@ if st.session_state.mode == "Setup & Monitor":
         st.markdown("---")
         st.info("**Note:** This mode provides direct control over all hardware. Only authorized personnel should access this mode.")
         st.stop()
+
+    # Auto-refresh every 2 seconds in Setup mode
+    count = st_autorefresh(
+        interval=2000,           # 2 second refresh
+        debounce=True,           # Pause during user interaction
+        key="setup_autorefresh"
+    )
     
     # Authenticated - show controls
     st.title("Setup & Monitor Mode")
@@ -766,6 +815,9 @@ if st.session_state.mode == "Setup & Monitor":
             st.error("❌ SiPM supply not connected")
             st.info("Check USB connection and permissions")
         else:
+            # Auto-refresh every 2 seconds when output is ON
+            if st.session_state.sipm_output_on:
+                count = st_autorefresh(interval=2000, key="sipm_refresh")
             # Get real-time values
             if st.session_state.sipm_output_on:
                 try:
@@ -789,7 +841,7 @@ if st.session_state.mode == "Setup & Monitor":
                     set_i1 = st.session_state.sipm_supply.get_current_setpoint(1)
                 except:
                     set_v1 = 5.0
-                    set_i1 = 1000.0
+                    set_i1 = 1.0
                 
                 st.text(f"Set Voltage: {set_v1:.2f} V")
                 st.text(f"Set Current: {set_i1:.3f} A")
@@ -806,7 +858,7 @@ if st.session_state.mode == "Setup & Monitor":
                     set_i2 = st.session_state.sipm_supply.get_current_setpoint(2)
                 except:
                     set_v2 = 5.0
-                    set_i2 = 1000.0
+                    set_i2 = 1.0
                 
                 st.text(f"Set Voltage: {set_v2:.2f} V")
                 st.text(f"Set Current: {set_i2:.3f} A")
@@ -864,6 +916,113 @@ if st.session_state.mode == "Setup & Monitor":
                             st.error(f"Failed to disable output: {e}")
             
             st.markdown("---")
+
+            # Initialize session state for graph data
+            if 'sipm_voltage_history' not in st.session_state:
+                st.session_state.sipm_voltage_history = {
+                    'ch1': [],
+                    'ch2': [],
+                    'timestamps': []
+                }
+
+            if 'sipm_current_history' not in st.session_state:
+                st.session_state.sipm_current_history = {
+                    'ch1': [],
+                    'ch2': [],
+                    'timestamps': []
+                }
+
+            # Collect data when output is ON
+            if st.session_state.get('sipm_connected', False) and st.session_state.sipm_output_on:
+                try:
+                    from datetime import datetime
+                    now = datetime.now()
+                    
+                    # Limit to last 100 points
+                    max_points = 100
+                    
+                    # Add voltage data
+                    st.session_state.sipm_voltage_history['ch1'].append(ch1_v)
+                    st.session_state.sipm_voltage_history['ch2'].append(ch2_v)
+                    st.session_state.sipm_voltage_history['timestamps'].append(now)
+                    
+                    # Add current data (convert to mA)
+                    st.session_state.sipm_current_history['ch1'].append(ch1_i * 1000)
+                    st.session_state.sipm_current_history['ch2'].append(ch2_i * 1000)
+                    st.session_state.sipm_current_history['timestamps'].append(now)
+                    
+                    # Trim to max points
+                    if len(st.session_state.sipm_voltage_history['timestamps']) > max_points:
+                        for history in [st.session_state.sipm_voltage_history, 
+                                    st.session_state.sipm_current_history]:
+                            history['ch1'] = history['ch1'][-max_points:]
+                            history['ch2'] = history['ch2'][-max_points:]
+                            history['timestamps'] = history['timestamps'][-max_points:]
+                except:
+                    pass
+
+            st.markdown("---")
+            st.markdown("### 📊 Real-time Monitoring")
+
+            # Show graphs if we have data
+            if len(st.session_state.sipm_voltage_history['timestamps']) > 0:
+                
+                import pandas as pd
+                
+                # Voltage graphs (side by side)
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("**Channel 1 Voltage**")
+                    v_df_ch1 = pd.DataFrame({
+                        'Time': st.session_state.sipm_voltage_history['timestamps'],
+                        'Voltage (V)': st.session_state.sipm_voltage_history['ch1']
+                    })
+                    st.line_chart(v_df_ch1.set_index('Time'), height=200)
+                
+                with col2:
+                    st.markdown("**Channel 2 Voltage**")
+                    v_df_ch2 = pd.DataFrame({
+                        'Time': st.session_state.sipm_voltage_history['timestamps'],
+                        'Voltage (V)': st.session_state.sipm_voltage_history['ch2']
+                    })
+                    st.line_chart(v_df_ch2.set_index('Time'), height=200)
+                
+                # Current graphs (side by side)
+                col3, col4 = st.columns(2)
+                
+                with col3:
+                    st.markdown("**Channel 1 Current**")
+                    i_df_ch1 = pd.DataFrame({
+                        'Time': st.session_state.sipm_current_history['timestamps'],
+                        'Current (mA)': st.session_state.sipm_current_history['ch1']
+                    })
+                    st.line_chart(i_df_ch1.set_index('Time'), height=200)
+                
+                with col4:
+                    st.markdown("**Channel 2 Current**")
+                    i_df_ch2 = pd.DataFrame({
+                        'Time': st.session_state.sipm_current_history['timestamps'],
+                        'Current (mA)': st.session_state.sipm_current_history['ch2']
+                    })
+                    st.line_chart(i_df_ch2.set_index('Time'), height=200)
+                
+                # Control buttons
+                col_clear, col_refresh = st.columns([1, 1])
+                with col_clear:
+                    if st.button("🗑️ Clear History", key="clear_sipm_history"):
+                        st.session_state.sipm_voltage_history = {'ch1': [], 'ch2': [], 'timestamps': []}
+                        st.session_state.sipm_current_history = {'ch1': [], 'ch2': [], 'timestamps': []}
+                        st.rerun()
+                
+                with col_refresh:
+                    if st.button("🔄 Update Reading", key="refresh_sipm_manual"):
+                        st.rerun()
+
+            else:
+                st.info("📈 Turn output ON to start collecting data for graphs")
+                if st.button("🔄 Update Reading", key="refresh_sipm_manual_nodata"):
+                    st.rerun()
             
             # Optional: Show system status
             with st.expander("📊 System Status Details"):
