@@ -9,6 +9,7 @@ Usage:
 """
 
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 import time
 from datetime import datetime, timedelta
 import pandas as pd
@@ -17,6 +18,7 @@ import json
 import sys
 import os
 from pathlib import Path
+import atexit
 
 # Add paths
 script_dir = Path(__file__).parent  # gui/
@@ -29,13 +31,26 @@ sys.path.insert(0, str(linux_dir))
 xarm_sdk_path = linux_dir / "xArm-Python-SDK"
 sys.path.insert(0, str(xarm_sdk_path))
 
-# Try to import digitizer
+# Library imports
 try:
     from drivers.caen_digitizer_wavedump import CAENDigitizerWaveDump
     DIGITIZER_AVAILABLE = True
 except ImportError as e:
     DIGITIZER_AVAILABLE = False
     print(f"⚠ Digitizer driver not available: {e}")
+
+try:
+    from drivers.sipm_ips2303s import IPS2303s
+    SIPM_AVAILABLE = True
+except ImportError as e:
+    SIPM_AVAILABLE = False
+    print(f"⚠ SiPM driver not available: {e}")
+
+# ============================================================================
+# MODULE-LEVEL GLOBALS (for cleanup without Streamlit context)
+# ============================================================================
+_sipm_supply = None
+_digitizer = None
 
 # Page config
 st.set_page_config(
@@ -355,6 +370,9 @@ if 'digitizer' not in st.session_state:
             st.session_state.digitizer = digitizer
             st.session_state.digitizer_connected = True
             st.session_state.digitizer_status = digitizer.get_status()
+
+            _digitizer = digitizer
+
         except Exception as e:
             st.session_state.digitizer = None
             st.session_state.digitizer_connected = False
@@ -366,6 +384,31 @@ if 'digitizer' not in st.session_state:
 # Initialize acquisition state
 if 'last_acquisition' not in st.session_state:
     st.session_state.last_acquisition = None
+
+
+# Initialize SiPM power supply
+if 'sipm_supply' not in st.session_state:
+    if SIPM_AVAILABLE:
+        try:
+            sipm = IPS2303s(port='/dev/ttyUSB0', baud=115200)
+            st.session_state.sipm_supply = sipm
+            st.session_state.sipm_connected = True
+
+            # Store globally for cleanup
+            _sipm_supply = sipm
+
+        except Exception as e:
+            st.session_state.sipm_supply = None
+            st.session_state.sipm_connected = False
+            print(f"SiPM initialization failed: {e}")
+    else:
+        st.session_state.sipm_supply = None
+        st.session_state.sipm_connected = False
+
+# SiPM output state
+if 'sipm_output_on' not in st.session_state:
+    st.session_state.sipm_output_on = False
+
 
 # Initialize session state
 if 'authenticated' not in st.session_state:
@@ -412,6 +455,45 @@ if 'laser_trigger_mode' not in st.session_state:
     st.session_state.laser_trigger_mode = "EXT"
 if 'selected_sequence' not in st.session_state:
     st.session_state.selected_sequence = "Dark Current Check (5 min)"
+
+if 'cleanup_registered' not in st.session_state:
+    
+    def cleanup_devices():
+        """Cleanup devices on exit"""
+        global _sipm_supply, _digitizer
+        
+        print("\n" + "="*60)
+        print("SHUTTING DOWN - Cleaning up devices...")
+        print("="*60)
+        
+        cleaned = []
+        
+        if _sipm_supply is not None:
+            try:
+                _sipm_supply.OFF()
+                _sipm_supply.close()
+                cleaned.append("✓ SiPM supply: Output OFF, connection closed")
+            except Exception as e:
+                cleaned.append(f"⚠ SiPM: {e}")
+        
+        if _digitizer is not None:
+            try:
+                _digitizer.cleanup_temp_files()
+                cleaned.append("✓ Digitizer: Cleaned")
+            except Exception as e:
+                cleaned.append(f"⚠ Digitizer: {e}")
+        
+        if cleaned:
+            for msg in cleaned:
+                print(f"  {msg}")
+        
+        print("="*60)
+        print("Cleanup complete. Safe to exit.")
+        print("="*60 + "\n")
+        sys.stdout.flush()
+    
+    atexit.register(cleanup_devices)
+    st.session_state.cleanup_registered = True
 
 # ============================================================================
 # SIDEBAR
@@ -477,7 +559,14 @@ with st.sidebar:
         st.caption("  ↳ Ramping...")
     
     # SiPM
-    sipm_status = 'green' if st.session_state.device_enabled['sipm'] else 'red'
+    if st.session_state.get('sipm_connected', False):
+        if st.session_state.sipm_output_on:
+            sipm_status = 'green'
+        else:
+            sipm_status = 'red'
+    else:
+        sipm_status = 'grey'
+
     st.markdown(f"{status_dot(sipm_status)} SiPM Supply", unsafe_allow_html=True)
     
     # Signal Gen
@@ -583,6 +672,13 @@ if st.session_state.mode == "Setup & Monitor":
         st.markdown("---")
         st.info("**Note:** This mode provides direct control over all hardware. Only authorized personnel should access this mode.")
         st.stop()
+
+    # Auto-refresh every 2 seconds in Setup mode
+    count = st_autorefresh(
+        interval=2000,           # 2 second refresh
+        debounce=True,           # Pause during user interaction
+        key="setup_autorefresh"
+    )
     
     # Authenticated - show controls
     st.title("Setup & Monitor Mode")
@@ -713,55 +809,236 @@ if st.session_state.mode == "Setup & Monitor":
     
     # TAB 2: SiPM Supply
     with tabs[1]:
-        st.subheader("Keithley SiPM Power Supply")
+        st.subheader("IPS-2303S SiPM Power Supply")
         
-        col1, col2, col3 = st.columns([2, 2, 1])
-        
-        with col1:
-            st.markdown("**Channel 1:**")
-            sipm_v1 = st.number_input("Voltage (V)", min_value=0.0, max_value=5.0, value=3.3, step=0.1, key="sipm_v1")
-            sipm_i1 = st.number_input("Current Limit (mA)", min_value=0.0, max_value=100.0, value=50.0, key="sipm_i1")
-            
-            st.metric("Measured V", f"{sipm_v1:.2f} V" if st.session_state.device_enabled['sipm'] else "0.00 V")
-            st.metric("Measured I", "2.45 mA" if st.session_state.device_enabled['sipm'] else "0.00 mA")
-        
-        with col2:
-            st.markdown("**Channel 2:**")
-            sipm_v2 = st.number_input("Voltage (V)", min_value=0.0, max_value=5.0, value=3.3, step=0.1, key="sipm_v2")
-            sipm_i2 = st.number_input("Current Limit (mA)", min_value=0.0, max_value=100.0, value=50.0, key="sipm_i2")
-            
-            st.metric("Measured V", f"{sipm_v2:.2f} V" if st.session_state.device_enabled['sipm'] else "0.00 V")
-            st.metric("Measured I", "2.38 mA" if st.session_state.device_enabled['sipm'] else "0.00 mA")
-        
-        with col3:
-            st.markdown("**Output Control:**")
-            st.write(" ")
-            
-            # Status indicator
-            if st.session_state.device_enabled['sipm']:
-                st.markdown(f"{status_dot('green')} Output ON", unsafe_allow_html=True)
+        if not st.session_state.get('sipm_connected', False):
+            st.error("❌ SiPM supply not connected")
+            st.info("Check USB connection and permissions")
+        else:
+            # Auto-refresh every 2 seconds when output is ON
+            if st.session_state.sipm_output_on:
+                count = st_autorefresh(interval=2000, key="sipm_refresh")
+            # Get real-time values
+            if st.session_state.sipm_output_on:
+                try:
+                    ch1_v = st.session_state.sipm_supply.get_voltage(1)
+                    ch1_i = st.session_state.sipm_supply.get_current(1)
+                    ch2_v = st.session_state.sipm_supply.get_voltage(2)
+                    ch2_i = st.session_state.sipm_supply.get_current(2)
+                except:
+                    ch1_v = ch1_i = ch2_v = ch2_i = 0.0
             else:
-                st.markdown(f"{status_dot('grey')} Output OFF", unsafe_allow_html=True)
+                ch1_v = ch1_i = ch2_v = ch2_i = 0.0
             
-            st.write(" ")
-            st.write(" ")
+            col1, col2, col3 = st.columns([2, 2, 1])
             
-            # Single output enable button (channel independent)
-            col_a, col_b = st.columns(2)
-            with col_a:
-                if st.button("Enable Output", key="sipm_enable", use_container_width=True):
-                    st.session_state.device_enabled['sipm'] = True
-                    st.success("Output enabled")
+            with col1:
+                st.markdown("**Channel 1:**")
+                
+                # Get actual setpoints from hardware
+                try:
+                    set_v1 = st.session_state.sipm_supply.get_voltage_setpoint(1)
+                    set_i1 = st.session_state.sipm_supply.get_current_setpoint(1)
+                except:
+                    set_v1 = 5.0
+                    set_i1 = 1.0
+                
+                st.text(f"Set Voltage: {set_v1:.2f} V")
+                st.text(f"Set Current: {set_i1:.3f} A")
+                
+                st.metric("Measured V", f"{ch1_v:.3f} V")
+                st.metric("Measured I", f"{ch1_i*1000:.2f} mA")  # Convert A to mA
+
+            with col2:
+                st.markdown("**Channel 2:**")
+                
+                # Get actual setpoints from hardware
+                try:
+                    set_v2 = st.session_state.sipm_supply.get_voltage_setpoint(2)
+                    set_i2 = st.session_state.sipm_supply.get_current_setpoint(2)
+                except:
+                    set_v2 = 5.0
+                    set_i2 = 1.0
+                
+                st.text(f"Set Voltage: {set_v2:.2f} V")
+                st.text(f"Set Current: {set_i2:.3f} A")
+                
+                st.metric("Measured V", f"{ch2_v:.3f} V")
+                st.metric("Measured I", f"{ch2_i*1000:.2f} mA")  # Convert A to mA
+            
+            with col3:
+                st.markdown("**Output Control:**")
+                st.write(" ")
+                
+                # Status indicator
+                if st.session_state.sipm_output_on:
+                    st.markdown(f"{status_dot('green')} Output ON", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"{status_dot('grey')} Output OFF", unsafe_allow_html=True)
+                
+                st.write(" ")
+                st.write(" ")
+                
+                # Output control buttons
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    if st.button(
+                        "Turn ON",
+                        key="sipm_real_enable",
+                        use_container_width=True,
+                        disabled=st.session_state.sipm_output_on
+                    ):
+                        try:
+                            st.session_state.sipm_supply.ON()
+                            st.session_state.sipm_output_on = True
+                            st.session_state.device_enabled['sipm'] = True
+                            st.success("✓ Output enabled")
+                            time.sleep(0.5)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to enable output: {e}")
+                
+                with col_b:
+                    if st.button(
+                        "Turn OFF",
+                        key="sipm_real_disable",
+                        use_container_width=True,
+                        disabled=not st.session_state.sipm_output_on
+                    ):
+                        try:
+                            st.session_state.sipm_supply.OFF()
+                            st.session_state.sipm_output_on = False
+                            st.session_state.device_enabled['sipm'] = False
+                            st.info("✓ Output disabled")
+                            time.sleep(0.5)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to disable output: {e}")
+            
+            st.markdown("---")
+
+            # Initialize session state for graph data
+            if 'sipm_voltage_history' not in st.session_state:
+                st.session_state.sipm_voltage_history = {
+                    'ch1': [],
+                    'ch2': [],
+                    'timestamps': []
+                }
+
+            if 'sipm_current_history' not in st.session_state:
+                st.session_state.sipm_current_history = {
+                    'ch1': [],
+                    'ch2': [],
+                    'timestamps': []
+                }
+
+            # Collect data when output is ON
+            if st.session_state.get('sipm_connected', False) and st.session_state.sipm_output_on:
+                try:
+                    from datetime import datetime
+                    now = datetime.now()
+                    
+                    # Limit to last 100 points
+                    max_points = 100
+                    
+                    # Add voltage data
+                    st.session_state.sipm_voltage_history['ch1'].append(ch1_v)
+                    st.session_state.sipm_voltage_history['ch2'].append(ch2_v)
+                    st.session_state.sipm_voltage_history['timestamps'].append(now)
+                    
+                    # Add current data (convert to mA)
+                    st.session_state.sipm_current_history['ch1'].append(ch1_i * 1000)
+                    st.session_state.sipm_current_history['ch2'].append(ch2_i * 1000)
+                    st.session_state.sipm_current_history['timestamps'].append(now)
+                    
+                    # Trim to max points
+                    if len(st.session_state.sipm_voltage_history['timestamps']) > max_points:
+                        for history in [st.session_state.sipm_voltage_history, 
+                                    st.session_state.sipm_current_history]:
+                            history['ch1'] = history['ch1'][-max_points:]
+                            history['ch2'] = history['ch2'][-max_points:]
+                            history['timestamps'] = history['timestamps'][-max_points:]
+                except:
+                    pass
+
+            st.markdown("---")
+            st.markdown("### 📊 Real-time Monitoring")
+
+            # Show graphs if we have data
+            if len(st.session_state.sipm_voltage_history['timestamps']) > 0:
+                
+                import pandas as pd
+                
+                # Voltage graphs (side by side)
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("**Channel 1 Voltage**")
+                    v_df_ch1 = pd.DataFrame({
+                        'Time': st.session_state.sipm_voltage_history['timestamps'],
+                        'Voltage (V)': st.session_state.sipm_voltage_history['ch1']
+                    })
+                    st.line_chart(v_df_ch1.set_index('Time'), height=200)
+                
+                with col2:
+                    st.markdown("**Channel 2 Voltage**")
+                    v_df_ch2 = pd.DataFrame({
+                        'Time': st.session_state.sipm_voltage_history['timestamps'],
+                        'Voltage (V)': st.session_state.sipm_voltage_history['ch2']
+                    })
+                    st.line_chart(v_df_ch2.set_index('Time'), height=200)
+                
+                # Current graphs (side by side)
+                col3, col4 = st.columns(2)
+                
+                with col3:
+                    st.markdown("**Channel 1 Current**")
+                    i_df_ch1 = pd.DataFrame({
+                        'Time': st.session_state.sipm_current_history['timestamps'],
+                        'Current (mA)': st.session_state.sipm_current_history['ch1']
+                    })
+                    st.line_chart(i_df_ch1.set_index('Time'), height=200)
+                
+                with col4:
+                    st.markdown("**Channel 2 Current**")
+                    i_df_ch2 = pd.DataFrame({
+                        'Time': st.session_state.sipm_current_history['timestamps'],
+                        'Current (mA)': st.session_state.sipm_current_history['ch2']
+                    })
+                    st.line_chart(i_df_ch2.set_index('Time'), height=200)
+                
+                # Control buttons
+                col_clear, col_refresh = st.columns([1, 1])
+                with col_clear:
+                    if st.button("🗑️ Clear History", key="clear_sipm_history"):
+                        st.session_state.sipm_voltage_history = {'ch1': [], 'ch2': [], 'timestamps': []}
+                        st.session_state.sipm_current_history = {'ch1': [], 'ch2': [], 'timestamps': []}
+                        st.rerun()
+                
+                with col_refresh:
+                    if st.button("🔄 Update Reading", key="refresh_sipm_manual"):
+                        st.rerun()
+
+            else:
+                st.info("📈 Turn output ON to start collecting data for graphs")
+                if st.button("🔄 Update Reading", key="refresh_sipm_manual_nodata"):
                     st.rerun()
-            with col_b:
-                if st.button("Disable Output", key="sipm_disable", use_container_width=True):
-                    st.session_state.device_enabled['sipm'] = False
-                    st.info("Output disabled")
-                    st.rerun()
-        
-        st.markdown("---")
-        st.caption("ℹ️ Output enable/disable affects both channels simultaneously")
-    
+            
+            # Optional: Show system status
+            with st.expander("📊 System Status Details"):
+                try:
+                    status = st.session_state.sipm_supply.get_status()
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.text(f"CH1 Voltage: {status.get('ch1_v', 0):.3f} V")
+                        st.text(f"CH2 Voltage: {status.get('ch2_v', 0):.3f} V")
+                    with col2:
+                        st.text(f"Output: {'ON' if status.get('output_on') else 'OFF'}")
+                        st.text(f"Connected: {'Yes' if status.get('connected') else 'No'}")
+                except Exception as e:
+                    st.error(f"Could not read status: {e}")
+                
     # TAB 3: Signal Generator
     with tabs[2]:
         st.subheader("Siglent SDG2122X Signal Generator")
