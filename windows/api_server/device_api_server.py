@@ -17,6 +17,12 @@ from contextlib import asynccontextmanager
 import uvicorn
 from loguru import logger
 import sys
+import os
+
+# Add parent directory to path so we can import drivers
+script_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(script_dir)
+sys.path.insert(0, parent_dir)
 
 # Import device drivers
 from drivers.caen_dt5533e import DT5533E
