@@ -46,6 +46,13 @@ except ImportError as e:
     SIPM_AVAILABLE = False
     print(f"⚠ SiPM driver not available: {e}")
 
+try:
+    from api_client.device_api_client import WindowsDeviceClient
+    API_CLIENT_AVAILABLE = True
+except ImportError as e:
+    API_CLIENT_AVAILABLE = False
+    print(f"⚠  Windows API client not available: {e}")
+
 # ============================================================================
 # MODULE-LEVEL GLOBALS (for cleanup without Streamlit context)
 # ============================================================================
@@ -55,7 +62,7 @@ _digitizer = None
 # Page config
 st.set_page_config(
     page_title="HyperK PMT DAQ Control",
-    page_icon="⚛️",
+    page_icon="🦾",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -409,6 +416,65 @@ if 'sipm_supply' not in st.session_state:
 if 'sipm_output_on' not in st.session_state:
     st.session_state.sipm_output_on = False
 
+# CAEN HV channel history (for graphs)
+if 'caen_voltage_history' not in st.session_state:
+    st.session_state.caen_voltage_history = {
+        'ch0': [], 'ch1': [], 'ch2': [], 'ch3': [],
+        'timestamps': []
+    }
+
+if 'caen_current_history' not in st.session_state:
+    st.session_state.caen_current_history = {
+        'ch0': [], 'ch1': [], 'ch2': [], 'ch3': [],
+        'timestamps': []
+    }
+
+# Initialize Windows API client
+if 'api_client' not in st.session_state:
+    if API_CLIENT_AVAILABLE:
+        try:
+            # Connect to Windows machine
+            api_client = WindowsDeviceClient("192.168.0.186", port=8000)
+            
+            # Test connection
+            if api_client.check_connection():
+                st.session_state.api_client = api_client
+                st.session_state.api_connected = True
+                
+                # Store globally for cleanup
+                _api_client = api_client
+                
+                print("✓ Connected to Windows API server")
+            else:
+                st.session_state.api_client = None
+                st.session_state.api_connected = False
+                print("✗ Windows API server not responding")
+                
+        except Exception as e:
+            st.session_state.api_client = None
+            st.session_state.api_connected = False
+            print(f"Windows API initialization failed: {e}")
+    else:
+        st.session_state.api_client = None
+        st.session_state.api_connected = False
+
+# Initialize CAEN HV session state
+if 'caen_channels' not in st.session_state:
+    st.session_state.caen_channels = {}
+    for ch in range(4):  # 4 channels (0-3), but we use 1-3 for PMTs
+        st.session_state.caen_channels[ch] = {
+            'voltage_set': 0.0,
+            'voltage_mon': 0.0,
+            'current_set': 50.0,  # Default 50µA
+            'current_mon': 0.0,
+            'power_on': False,
+            'ramp_up': 50.0,  # Default 50 V/s
+            'ramp_down': 100.0,  # Default 100 V/s
+            'ramping': False,
+            'status': {}
+        }
+
+
 
 # Initialize session state
 if 'authenticated' not in st.session_state:
@@ -483,6 +549,14 @@ if 'cleanup_registered' not in st.session_state:
             except Exception as e:
                 cleaned.append(f"⚠ Digitizer: {e}")
         
+        
+        # if _api_client is not None:
+        #     try:
+        #         # Optionally send shutdown commands to Windows devices
+        #         # _api_client.caen_emergency_off()
+        #         cleaned.append("✓ API client: Disconnected")
+        #     except Exception as e:
+        #         cleaned.append(f"⚠  API: {e}")
         if cleaned:
             for msg in cleaned:
                 print(f"  {msg}")
@@ -734,78 +808,289 @@ if st.session_state.mode == "Setup & Monitor":
     with tabs[0]:
         st.subheader("CAEN DT5533E - PMT High Voltage")
         
-        for i in range(3):
-            with st.expander(f"Channel {i+1} (PMT {i+1})", expanded=(i==0)):
-                col1, col2, col3 = st.columns([2, 2, 1])
-                
-                with col1:
-                    st.markdown("**Setpoints:**")
-                    voltage = st.number_input(
-                        "Voltage (V)", 
-                        min_value=0, 
-                        max_value=2000, 
-                        value=st.session_state.pmt_voltages[i],
-                        step=50,
-                        key=f'pmt_v_{i}'
-                    )
-                    current_limit = st.number_input(
-                        "Current Limit (µA)", 
-                        min_value=0.0, 
-                        max_value=3000.0, 
-                        value=50.0,
-                        step=10.0,
-                        key=f'pmt_i_{i}'
-                    )
-                    ramp_rate = st.number_input(
-                        "Ramp Rate (V/s)",
-                        min_value=1,
-                        max_value=100,
-                        value=50,
-                        step=10,
-                        key=f'pmt_ramp_{i}'
-                    )
-                
-                with col2:
-                    st.markdown("**Monitoring:**")
+        if not st.session_state.get('api_connected', False):
+            st.error("❌ Windows API server not connected")
+            st.info("Check that device_api_server.py is running on Windows machine")
+            st.code("python device_api_server.py", language="bash")
+        else:
+            # Auto-refresh every 2 seconds to monitor ramping
+            count = st_autorefresh(interval=2000, key="caen_refresh")
+            
+            # PMT channel mapping (channels 1-3 for PMT1-3, channel 0 unused)
+            for i in range(1, 4):  # Channels 1, 2, 3
+                with st.expander(f"Channel {i} (PMT {i})", expanded=(i==1)):
+                    # Get real-time status from API
+                    try:
+                        channel_status = st.session_state.api_client.caen_get_status(i)
+                        st.session_state.caen_channels[i]['voltage_mon'] = channel_status['voltage_mon']
+                        st.session_state.caen_channels[i]['current_mon'] = channel_status['current_mon']
+                        st.session_state.caen_channels[i]['power_on'] = channel_status['power_on']
+                        st.session_state.caen_channels[i]['voltage_set'] = channel_status['voltage_set']
+                        st.session_state.caen_channels[i]['current_set'] = channel_status.get('current_set', 50.0)
+                        st.session_state.caen_channels[i]['ramp_up'] = channel_status['ramp_up']
+                        st.session_state.caen_channels[i]['ramp_down'] = channel_status['ramp_down']
+                        st.session_state.caen_channels[i]['status'] = channel_status.get('status', {})
+                        
+                        # Determine if ramping (voltage not at setpoint)
+                        v_mon = channel_status['voltage_mon']
+                        v_set = channel_status['voltage_set']
+                        is_ramping = channel_status['power_on'] and abs(v_mon - v_set) > 10  # 10V tolerance
+                        st.session_state.caen_channels[i]['ramping'] = is_ramping
+                        
+                    except Exception as e:
+                        st.error(f"Failed to read channel {i}: {e}")
+                        v_mon = st.session_state.caen_channels[i]['voltage_mon']
+                        is_ramping = st.session_state.caen_channels[i]['ramping']
                     
-                    # Mock monitoring with ramping behavior
-                    if st.session_state.pmt_power[i]:
-                        if st.session_state.pmt_ramping[i]:
-                            v_mon = voltage * 0.75  # Simulating ramping
-                            status_text = f"{status_dot('yellow')} Ramping Up"
+                    col1, col2, col3 = st.columns([2, 2, 1])
+                    
+                    with col1:
+                        st.markdown("**Setpoints:**")
+                        
+                        # Get current values from session state
+                        current_v_set = st.session_state.caen_channels[i]['voltage_set']
+                        current_i_set = st.session_state.caen_channels[i]['current_set']
+                        current_ramp_up = st.session_state.caen_channels[i]['ramp_up']
+                        current_ramp_down = st.session_state.caen_channels[i]['ramp_down']
+                        
+                        voltage = st.number_input(
+                            "Voltage (V)", 
+                            min_value=0, 
+                            max_value=2000, 
+                            value=int(current_v_set),
+                            step=50,
+                            key=f'pmt_v_{i}',
+                            help="Target voltage setpoint"
+                        )
+                        current_limit = st.number_input(
+                            "Current Limit (µA)", 
+                            min_value=0.0, 
+                            max_value=3000.0, 
+                            value=current_i_set,
+                            step=10.0,
+                            key=f'pmt_i_{i}',
+                            help="Overcurrent protection limit"
+                        )
+                        
+                        col_ramp1, col_ramp2 = st.columns(2)
+                        with col_ramp1:
+                            ramp_up = st.number_input(
+                                "Ramp Up (V/s)",
+                                min_value=1,
+                                max_value=500,
+                                value=int(current_ramp_up),
+                                step=10,
+                                key=f'pmt_ramp_up_{i}',
+                                help="Voltage increase rate"
+                            )
+                        with col_ramp2:
+                            ramp_down = st.number_input(
+                                "Ramp Down (V/s)",
+                                min_value=1,
+                                max_value=500,
+                                value=int(current_ramp_down),
+                                step=10,
+                                key=f'pmt_ramp_down_{i}',
+                                help="Voltage decrease rate"
+                            )
+                        
+                        # Apply configuration button
+                        if st.button("Apply Config", key=f'pmt_apply_{i}', use_container_width=True):
+                            try:
+                                st.session_state.api_client.caen_configure_channel(
+                                    channel=i,
+                                    voltage=voltage,
+                                    current_limit=current_limit,
+                                    ramp_up=ramp_up,
+                                    ramp_down=ramp_down
+                                )
+                                st.success(f"✓ Channel {i} configured")
+                                time.sleep(0.5)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Configuration failed: {e}")
+                    
+                    with col2:
+                        st.markdown("**Monitoring:**")
+                        
+                        # Status with proper color coding
+                        power_on = st.session_state.caen_channels[i]['power_on']
+                        
+                        if power_on:
+                            if is_ramping:
+                                status_text = f"{status_dot('yellow')} Ramping"
+                                # Show progress
+                                if v_set > 0:
+                                    ramp_progress = min(100, int((v_mon / v_set) * 100))
+                                    st.progress(ramp_progress / 100)
+                                    st.caption(f"Progress: {ramp_progress}%")
+                            else:
+                                status_text = f"{status_dot('green')} On"
                         else:
-                            v_mon = voltage * 0.98
-                            status_text = f"{status_dot('green')} On"
-                    else:
-                        v_mon = 0
-                        status_text = f"{status_dot('grey')} Off"
+                            status_text = f"{status_dot('grey')} Off"
+                        
+                        st.markdown(status_text, unsafe_allow_html=True)
+                        
+                        # Real-time metrics
+                        v_mon = st.session_state.caen_channels[i]['voltage_mon']
+                        i_mon = st.session_state.caen_channels[i]['current_mon']
+                        
+                        col_v, col_i = st.columns(2)
+                        with col_v:
+                            st.metric("Voltage (V)", f"{v_mon:.1f}")
+                            st.caption(f"Set: {current_v_set:.0f}V")
+                        with col_i:
+                            st.metric("Current (µA)", f"{i_mon:.2f}")
+                            st.caption(f"Limit: {current_i_set:.0f}µA")
+                        
+                        # Status flags (if available)
+                        status_flags = st.session_state.caen_channels[i]['status']
+                        if status_flags:
+                            warnings = []
+                            if status_flags.get('overcurrent'):
+                                warnings.append("⚠️ Overcurrent")
+                            if status_flags.get('overvoltage'):
+                                warnings.append("⚠️ Overvoltage")
+                            if status_flags.get('trip'):
+                                warnings.append("🛑 Tripped")
+                            
+                            if warnings:
+                                for warning in warnings:
+                                    st.warning(warning)
                     
-                    st.markdown(status_text, unsafe_allow_html=True)
-                    st.metric("Voltage (V)", f"{v_mon:.1f}")
-                    st.metric("Current (µA)", f"{2.3 if st.session_state.pmt_power[i] else 0:.1f}")
+                    with col3:
+                        st.markdown("**Control:**")
+                        st.write(" ")
+                        
+                        if not power_on:
+                            if st.button(f"Turn ON", key=f'pmt_on_{i}', use_container_width=True):
+                                try:
+                                    st.session_state.api_client.caen_set_power(i, True)
+                                    st.session_state.caen_channels[i]['power_on'] = True
+                                    st.session_state.caen_channels[i]['ramping'] = True
+                                    st.session_state.device_enabled['pmt_hv'] = True
+                                    st.success(f"✓ Channel {i} ON")
+                                    time.sleep(0.3)
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Power on failed: {e}")
+                        else:
+                            if st.button(f"Turn OFF", key=f'pmt_off_{i}', use_container_width=True):
+                                try:
+                                    st.session_state.api_client.caen_set_power(i, False)
+                                    st.session_state.caen_channels[i]['power_on'] = False
+                                    st.session_state.caen_channels[i]['ramping'] = False
+                                    
+                                    # Update overall device status
+                                    any_on = any(st.session_state.caen_channels[ch]['power_on'] for ch in range(1, 4))
+                                    st.session_state.device_enabled['pmt_hv'] = any_on
+                                    
+                                    st.info(f"✓ Channel {i} OFF")
+                                    time.sleep(0.3)
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Power off failed: {e}")
+            
+            st.markdown("---")
+            
+            # Real-time monitoring graphs (like SiPM tab)
+            st.markdown("### 📊 Real-time Monitoring")
+            
+            # Collect history data (only when any channel is powered)
+            any_powered = any(st.session_state.caen_channels[ch]['power_on'] for ch in range(1, 4))
+            
+            if any_powered:
+                from datetime import datetime
+                now = datetime.now()
+                max_points = 100
                 
-                with col3:
-                    st.markdown("**Control:**")
-                    st.write(" ")
+                # Add current readings to history
+                for ch_num in range(1, 4):
+                    v_mon = st.session_state.caen_channels[ch_num]['voltage_mon']
+                    i_mon = st.session_state.caen_channels[ch_num]['current_mon']
                     
-                    if not st.session_state.pmt_power[i]:
-                        if st.button(f"Turn ON", key=f'pmt_on_{i}', use_container_width=True):
-                            st.session_state.pmt_power[i] = True
-                            st.session_state.pmt_ramping[i] = True
-                            st.session_state.pmt_voltages[i] = voltage
-                            st.session_state.device_enabled['pmt_hv'] = any(st.session_state.pmt_power)
-                            st.rerun()
-                    else:
-                        if st.button(f"Turn OFF", key=f'pmt_off_{i}', use_container_width=True):
-                            st.session_state.pmt_power[i] = False
-                            st.session_state.pmt_ramping[i] = False
-                            st.session_state.device_enabled['pmt_hv'] = any(st.session_state.pmt_power)
-                            st.rerun()
-                    
-                    if st.session_state.pmt_ramping[i]:
-                        if st.button(f"✓ Done", key=f'pmt_done_{i}', use_container_width=True):
-                            st.session_state.pmt_ramping[i] = False
-                            st.rerun()
+                    st.session_state.caen_voltage_history[f'ch{ch_num}'].append(v_mon)
+                    st.session_state.caen_current_history[f'ch{ch_num}'].append(i_mon)
+                
+                st.session_state.caen_voltage_history['timestamps'].append(now)
+                st.session_state.caen_current_history['timestamps'].append(now)
+                
+                # Trim to max points
+                if len(st.session_state.caen_voltage_history['timestamps']) > max_points:
+                    for history in [st.session_state.caen_voltage_history, 
+                                    st.session_state.caen_current_history]:
+                        for key in history:
+                            history[key] = history[key][-max_points:]
+            
+            # Display graphs if we have data
+            if len(st.session_state.caen_voltage_history['timestamps']) > 0:
+                import pandas as pd
+                
+                # Voltage graphs (3 PMT channels side by side)
+                col1, col2, col3 = st.columns(3)
+                
+                for idx, col in enumerate([col1, col2, col3], start=1):
+                    with col:
+                        st.markdown(f"**Ch{idx} Voltage**")
+                        v_df = pd.DataFrame({
+                            'Time': st.session_state.caen_voltage_history['timestamps'],
+                            'Voltage (V)': st.session_state.caen_voltage_history[f'ch{idx}']
+                        })
+                        st.line_chart(v_df.set_index('Time'), height=200)
+                
+                # Current graphs (3 PMT channels side by side)
+                col4, col5, col6 = st.columns(3)
+                
+                for idx, col in enumerate([col4, col5, col6], start=1):
+                    with col:
+                        st.markdown(f"**Ch{idx} Current**")
+                        i_df = pd.DataFrame({
+                            'Time': st.session_state.caen_current_history['timestamps'],
+                            'Current (µA)': st.session_state.caen_current_history[f'ch{idx}']
+                        })
+                        st.line_chart(i_df.set_index('Time'), height=200)
+                
+                # Control buttons
+                col_clear, col_refresh = st.columns([1, 1])
+                with col_clear:
+                    if st.button("🗑️ Clear History", key="clear_caen_history"):
+                        st.session_state.caen_voltage_history = {
+                            'ch1': [], 'ch2': [], 'ch3': [],
+                            'timestamps': []
+                        }
+                        st.session_state.caen_current_history = {
+                            'ch1': [], 'ch2': [], 'ch3': [],
+                            'timestamps': []
+                        }
+                        st.rerun()
+                
+                with col_refresh:
+                    if st.button("🔄 Update Reading", key="refresh_caen_manual"):
+                        st.rerun()
+            else:
+                if any_powered:
+                    st.info("📈 Collecting data...")
+                else:
+                    st.info("📈 Turn on any channel to start monitoring")
+            
+            st.markdown("---")
+            
+            # Emergency off all channels
+            st.error("**Emergency Controls**")
+            col_a, col_b = st.columns([2, 1])
+            with col_a:
+                if st.button("🛑 EMERGENCY OFF - ALL CHANNELS", key='caen_emergency', use_container_width=True):
+                    try:
+                        st.session_state.api_client.caen_emergency_off()
+                        for ch in range(1, 4):
+                            st.session_state.caen_channels[ch]['power_on'] = False
+                            st.session_state.caen_channels[ch]['ramping'] = False
+                        st.session_state.device_enabled['pmt_hv'] = False
+                        st.error("⚠️ EMERGENCY STOP EXECUTED")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Emergency stop failed: {e}")
     
     # TAB 2: SiPM Supply
     with tabs[1]:
