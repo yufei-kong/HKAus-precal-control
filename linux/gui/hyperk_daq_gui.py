@@ -429,6 +429,13 @@ if 'caen_current_history' not in st.session_state:
         'timestamps': []
     }
 
+# Initialize SiPM current history
+if 'sipm_current_history' not in st.session_state:
+    st.session_state.sipm_current_history = {
+        'ch1': [], 'ch2': [],
+        'timestamps': []
+    }
+
 # Initialize Windows API client
 if 'api_client' not in st.session_state:
     if API_CLIENT_AVAILABLE:
@@ -767,19 +774,15 @@ if st.session_state.mode == "Setup & Monitor":
         st.info("**Note:** This mode provides direct control over all hardware. Only authorized personnel should access this mode.")
         st.stop()
 
-    # Auto-refresh every 2 seconds in Setup mode
-    count = st_autorefresh(
-        interval=2000,           # 2 second refresh
-        debounce=True,           # Pause during user interaction
-        key="setup_autorefresh"
-    )
-    
     # Authenticated - show controls
     st.title("Setup & Monitor Mode")
     st.caption("⚠️ Expert mode - Manual control of all devices")
     
-    col1, col2 = st.columns([6, 1])
+    col1, col2, col3 = st.columns([5, 1, 1])
     with col2:
+        if st.button("🔄 Refresh", use_container_width=True, key="manual_refresh_setup"):
+            st.rerun()
+    with col3:
         if st.button("🔒 Lock", use_container_width=True):
             st.session_state.authenticated = False
             st.rerun()
@@ -805,8 +808,7 @@ if st.session_state.mode == "Setup & Monitor":
             st.info("Check that device_api_server.py is running on Windows machine")
             st.code("python device_api_server.py", language="bash")
         else:
-            # Auto-refresh every 2 seconds to monitor ramping
-            count = st_autorefresh(interval=2000, key="caen_refresh")
+            # Mode-level auto-refresh handles updates
             
             # PMT channel mapping (channels 1-3 for PMT1-3, channel 0 unused)
             for i in range(1, 4):  # Channels 1, 2, 3
@@ -980,8 +982,8 @@ if st.session_state.mode == "Setup & Monitor":
             
             st.markdown("---")
             
-            # Real-time monitoring graphs (like SiPM tab)
-            st.markdown("### 📊 Real-time Monitoring")
+            # Real-time current monitoring graphs
+            st.markdown("### 📊 Current Monitoring")
             
             # Collect history data (only when any channel is powered)
             any_powered = any(st.session_state.caen_channels[ch]['power_on'] for ch in range(1, 4))
@@ -993,25 +995,15 @@ if st.session_state.mode == "Setup & Monitor":
                 
                 # Add current readings to history
                 for ch_num in range(1, 4):
-                    v_mon = st.session_state.caen_channels[ch_num]['voltage_mon']
                     i_mon = st.session_state.caen_channels[ch_num]['current_mon']
-                    
-                    st.session_state.caen_voltage_history[f'ch{ch_num}'].append(v_mon)
                     st.session_state.caen_current_history[f'ch{ch_num}'].append(i_mon)
                 
-                st.session_state.caen_voltage_history['timestamps'].append(now)
                 st.session_state.caen_current_history['timestamps'].append(now)
                 
                 # Trim to max points
-                if len(st.session_state.caen_voltage_history['timestamps']) > max_points:
-                    for history in [st.session_state.caen_voltage_history, 
-                                    st.session_state.caen_current_history]:
-                        for key in history:
-                            history[key] = history[key][-max_points:]
-            
-            # Current monitoring graphs
-            st.markdown("---")
-            st.markdown("### 📊 Current Monitoring")
+                if len(st.session_state.caen_current_history['timestamps']) > max_points:
+                    for key in st.session_state.caen_current_history:
+                        st.session_state.caen_current_history[key] = st.session_state.caen_current_history[key][-max_points:]
             
             if len(st.session_state.caen_current_history['timestamps']) > 0:
                 
@@ -1026,15 +1018,22 @@ if st.session_state.mode == "Setup & Monitor":
                         })
                         st.line_chart(i_df.set_index('Time'), height=200)
                 
-                # Clear button
-                if st.button("🗑️ Clear History", key="clear_caen_history"):
-                    st.session_state.caen_current_history = {
-                        'ch1': [], 'ch2': [], 'ch3': [], 'timestamps': []
-                    }
-                    st.rerun()
+                # Clear and refresh buttons
+                col_clear, col_refresh = st.columns(2)
+                with col_clear:
+                    if st.button("🗑️ Clear History", key="clear_caen_history"):
+                        st.session_state.caen_current_history = {
+                            'ch1': [], 'ch2': [], 'ch3': [], 'timestamps': []
+                        }
+                        st.rerun()
+                with col_refresh:
+                    if st.button("🔄 Update", key="refresh_caen_manual"):
+                        st.rerun()
             else:
                 st.info("📈 Turn on any channel to start monitoring current")
-    
+                if st.button("🔄 Update", key="refresh_caen_manual_nodata"):
+                    st.rerun()
+            
     # TAB 2: SiPM Supply
     with tabs[1]:
         st.subheader("IPS-2303S SiPM Power Supply")
@@ -1043,9 +1042,6 @@ if st.session_state.mode == "Setup & Monitor":
             st.error("❌ SiPM supply not connected")
             st.info("Check USB connection and permissions")
         else:
-            # Auto-refresh every 2 seconds when output is ON
-            if st.session_state.sipm_output_on:
-                count = st_autorefresh(interval=2000, key="sipm_refresh")
             # Get real-time values
             if st.session_state.sipm_output_on:
                 try:
@@ -1273,7 +1269,6 @@ if st.session_state.mode == "Setup & Monitor":
             st.error("⚠️ Windows API not connected")
             st.info("Check that device_api_server.py is running on Windows machine")
         else:
-            # Get status once (no auto-refresh needed for static trigger)
             try:
                 channel = 1  # We typically use channel 1
                 status = st.session_state.api_client.siggen_get_status(channel)
@@ -1424,11 +1419,6 @@ if st.session_state.mode == "Setup & Monitor":
         if not st.session_state.get('api_client'):
             st.error("⚠️ Windows API not connected")
         else:
-            # Auto-refresh every 2 seconds when laser is active
-            if st.session_state.get('laser_tec_on', False) or st.session_state.get('laser_ld_on', False):
-                count = st_autorefresh(interval=2000, key="laser_refresh")
-            
-            # Get real-time status
             try:
                 status = st.session_state.api_client.laser_get_status()
                 
@@ -1663,7 +1653,6 @@ if st.session_state.mode == "Setup & Monitor":
                         'pd_current': [],
                         'timestamps': []
                     }
-                
             
             except Exception as e:
                 st.error(f"Failed to communicate with laser: {e}")
@@ -2013,13 +2002,6 @@ else:
     # RUN SEQUENCE MODE (Default - No password)
     # ========================================================================
     
-    # Auto-refresh every 2 seconds in Run Sequence mode
-    count = st_autorefresh(
-        interval=2000,
-        debounce=True,
-        key="run_autorefresh"
-    )
-    
     st.title("Run Sequence Mode")
     st.caption("Automated measurement sequences with coordinated device control")
     
@@ -2142,8 +2124,12 @@ else:
     
     st.markdown("---")
     
-    # Real-time monitoring section
+    # Real-time monitoring section with auto-refresh
     st.subheader("📊 Real-time Monitoring")
+    
+    # Auto-refresh only in Run Sequence mode (not in Setup & Monitor)
+    if st.session_state.mode == 'Run Sequence':
+        count = st_autorefresh(interval=2000, key="run_monitor_refresh")
     
     # Collect data when devices are enabled
     if st.session_state.device_enabled.get('pmt_hv', False):
@@ -2241,7 +2227,7 @@ else:
             
             with col2:
                 board_temp = status.get('board_temp', 0)
-                if board_temp > 42:
+                if board_temp > 35:
                     temp_status = "⚠️ High"
                 elif board_temp > 30:
                     temp_status = "Normal"
