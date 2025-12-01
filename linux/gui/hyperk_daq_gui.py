@@ -24,6 +24,7 @@ import atexit
 script_dir = Path(__file__).parent  # gui/
 linux_dir = script_dir.parent        # linux/
 
+
 # Add linux directory to path so we can do "import drivers.xxx"
 sys.path.insert(0, str(linux_dir))
 
@@ -32,6 +33,20 @@ xarm_sdk_path = linux_dir / "xArm-Python-SDK"
 sys.path.insert(0, str(xarm_sdk_path))
 
 # Library imports
+try:
+    from drivers.xarm_pmt_controller import XArmPMTController
+    XARM_CONTROLLER_AVAILABLE = True
+except ImportError as e:
+    XARM_CONTROLLER_AVAILABLE = False
+    print(f"⚠ xArm PMT Controller not available: {e}")
+
+try:
+    from drivers.system_coordinator import HyperKSystemCoordinator
+    SYSTEM_COORDINATOR_AVAILABLE = True
+except ImportError as e:
+    SYSTEM_COORDINATOR_AVAILABLE = False
+    print(f"⚠ System Coordinator not available: {e}")
+
 try:
     from drivers.caen_digitizer_wavedump import CAENDigitizerWaveDump
     DIGITIZER_AVAILABLE = True
@@ -51,13 +66,15 @@ try:
     API_CLIENT_AVAILABLE = True
 except ImportError as e:
     API_CLIENT_AVAILABLE = False
-    print(f"⚠  Windows API client not available: {e}")
+    print(f"⚠ Windows API client not available: {e}")
 
 # ============================================================================
 # MODULE-LEVEL GLOBALS (for cleanup without Streamlit context)
 # ============================================================================
 _sipm_supply = None
 _digitizer = None
+_system_coordinator = None
+_robot_controller = None
 
 # Page config
 st.set_page_config(
@@ -465,6 +482,42 @@ if 'api_client' not in st.session_state:
         st.session_state.api_client = None
         st.session_state.api_connected = False
 
+# Initialize Robot Controller and System Coordinator
+if 'robot_controller' not in st.session_state:
+    if XARM_CONTROLLER_AVAILABLE and SYSTEM_COORDINATOR_AVAILABLE:
+        try:
+            # Import xArm SDK
+            from xarm.wrapper import XArmAPI
+            
+            # Connect to xArm
+            arm = XArmAPI('192.168.1.243')
+            arm.connect()
+            
+            # Create robot controller
+            robot_controller = XArmPMTController(arm=arm, digitizer=digitizer)
+            st.session_state.robot_controller = robot_controller
+            
+            # Create system coordinator (combines robot + Windows API)
+            system_coordinator = HyperKSystemCoordinator(
+                robot_controller=robot_controller,
+                api_client=st.session_state.api_client if 'api_client' in st.session_state else None
+            )
+            st.session_state.system_coordinator = system_coordinator
+            
+            # Store in module-level variables for cleanup (already at module scope, no global needed)
+            _robot_controller = robot_controller
+            _system_coordinator = system_coordinator
+            
+            print("✓ Robot controller and system coordinator initialized")
+            
+        except Exception as e:
+            st.session_state.robot_controller = None
+            st.session_state.system_coordinator = None
+            print(f"Robot controller initialization failed: {e}")
+    else:
+        st.session_state.robot_controller = None
+        st.session_state.system_coordinator = None
+
 # Initialize CAEN HV session state
 if 'caen_channels' not in st.session_state:
     st.session_state.caen_channels = {}
@@ -527,9 +580,11 @@ if 'laser_tec_on' not in st.session_state:
 if 'robot_position' not in st.session_state:
     st.session_state.robot_position = 'home'
 if 'linear_stage_pos' not in st.session_state:
-    st.session_state.linear_stage_pos = 657  # Middle position
-if 'robot_coords' not in st.session_state:
-    st.session_state.robot_coords = {'x': 200, 'y': 0, 'z': 300, 'roll': 0, 'pitch': 0, 'yaw': 0}
+    st.session_state.linear_stage_pos = 1074 #PMT 1 position
+if 'system_coordinator' not in st.session_state:
+    st.session_state.system_coordinator = None
+if 'robot_controller' not in st.session_state:
+    st.session_state.robot_controller = None
 if 'device_enabled' not in st.session_state:
     st.session_state.device_enabled = {
         'pmt_hv': False,
@@ -552,41 +607,43 @@ if 'selected_sequence' not in st.session_state:
 if 'cleanup_registered' not in st.session_state:
     
     def cleanup_devices():
-        """Cleanup devices on exit"""
-        global _sipm_supply, _digitizer
+        """Cleanup software resources on exit - does NOT shut down hardware"""
+        global _sipm_supply, _digitizer, _system_coordinator, _robot_controller
         
         print("\n" + "="*60)
-        print("SHUTTING DOWN - Cleaning up devices...")
+        print("GUI CLOSING - Cleaning up software resources...")
         print("="*60)
         
         cleaned = []
         
+        # Only close connections - do NOT turn off hardware
+        # Hardware should remain in its current state
+        
         if _sipm_supply is not None:
             try:
-                _sipm_supply.OFF()
-                _sipm_supply.close()
-                cleaned.append("✓ SiPM supply: Output OFF, connection closed")
+                _sipm_supply.close()  # Close connection only, do NOT turn OFF
+                cleaned.append("✓ SiPM supply: Connection closed (output state unchanged)")
             except Exception as e:
                 cleaned.append(f"⚠ SiPM: {e}")
         
         if _digitizer is not None:
             try:
                 _digitizer.cleanup_temp_files()
-                cleaned.append("✓ Digitizer: Cleaned")
+                cleaned.append("✓ Digitizer: Temp files cleaned")
             except Exception as e:
                 cleaned.append(f"⚠ Digitizer: {e}")
         
+        # Note: Robot, HV, laser, etc. remain in current state
+        # Use Emergency Stop button if you need to shut down hardware
         
-        # if _api_client is not None:
-        #     try:
-        #         # Optionally send shutdown commands to Windows devices
-        #         # _api_client.caen_emergency_off()
-        #         cleaned.append("✓ API client: Disconnected")
-        #     except Exception as e:
-        #         cleaned.append(f"⚠  API: {e}")
         if cleaned:
             for msg in cleaned:
                 print(f"  {msg}")
+        
+        print("="*60)
+        print("Cleanup complete. Hardware remains in current state.")
+        print("Use Emergency Stop button if hardware shutdown needed.")
+        print("="*60 + "\n")
         
         print("="*60)
         print("Cleanup complete. Safe to exit.")
@@ -715,7 +772,20 @@ with st.sidebar:
         col1, col2 = st.columns(2)
         with col1:
             if st.button("✓ YES", key='emergency_yes'):
-                # Execute emergency stop
+                # Execute emergency stop using system coordinator
+                if st.session_state.system_coordinator is not None:
+                    try:
+                        result = st.session_state.system_coordinator.emergency_shutdown_all(
+                            reason="Emergency stop button pressed in GUI"
+                        )
+                        if result['overall_success']:
+                            st.error("🚨 EMERGENCY STOP ACTIVATED - All systems shut down")
+                        else:
+                            st.error(f"⚠️ Emergency stop completed with errors: {result}")
+                    except Exception as e:
+                        st.error(f"Emergency stop failed: {e}")
+                
+                # Also update GUI state
                 st.session_state.pmt_power = [False, False, False]
                 st.session_state.pmt_ramping = [False, False, False]
                 st.session_state.laser_ld_on = False
@@ -723,7 +793,6 @@ with st.sidebar:
                 st.session_state.run_active = False
                 st.session_state.device_enabled = {k: False for k in st.session_state.device_enabled}
                 st.session_state.emergency_stop_confirm = False
-                st.error("EMERGENCY STOP ACTIVATED!")
                 time.sleep(1)
                 st.rerun()
         with col2:
@@ -1662,6 +1731,14 @@ if st.session_state.mode == "Setup & Monitor":
     with tabs[4]:
         st.subheader("xArm + Linear Stage Control")
         
+        # Controller Status
+        if st.session_state.robot_controller is not None:
+            st.success("✅ Robot controller connected")
+        else:
+            st.error("❌ Robot controller not connected - check startup logs")
+        
+        st.markdown("---")
+        
         col1, col2 = st.columns([1, 1])
         
         with col1:
@@ -1680,15 +1757,29 @@ if st.session_state.mode == "Setup & Monitor":
             col_a, col_b = st.columns(2)
             with col_a:
                 if st.button("📍 PMT1 (1074mm)", key="stage_pmt1", use_container_width=True):
-                    st.session_state.linear_stage_pos = 1074
-                    st.session_state.robot_position = 'pmt1'
-                    st.info("Moving to PMT1...")
+                    if st.session_state.robot_controller is not None:
+                        try:
+                            st.session_state.robot_controller.move_to_pmt(1)
+                            st.session_state.linear_stage_pos = 1074
+                            st.session_state.robot_position = 'pmt1'
+                            st.success("✓ Moved to PMT1")
+                        except Exception as e:
+                            st.error(f"Failed to move to PMT1: {e}")
+                    else:
+                        st.warning("⚠️ Robot controller not initialized")
                     st.rerun()
             with col_b:
                 if st.button("📍 PMT2 (240mm)", key="stage_pmt2", use_container_width=True):
-                    st.session_state.linear_stage_pos = 240
-                    st.session_state.robot_position = 'pmt2'
-                    st.info("Moving to PMT2...")
+                    if st.session_state.robot_controller is not None:
+                        try:
+                            st.session_state.robot_controller.move_to_pmt(2)
+                            st.session_state.linear_stage_pos = 240
+                            st.session_state.robot_position = 'pmt2'
+                            st.success("✓ Moved to PMT2")
+                        except Exception as e:
+                            st.error(f"Failed to move to PMT2: {e}")
+                    else:
+                        st.warning("⚠️ Robot controller not initialized")
                     st.rerun()
             
             # Manual position slider
@@ -1698,45 +1789,141 @@ if st.session_state.mode == "Setup & Monitor":
                                value=st.session_state.linear_stage_pos,
                                key="stage_manual")
             if st.button("Move to Position", key="stage_move"):
-                st.session_state.linear_stage_pos = new_pos
-                st.info(f"Moving to {new_pos} mm...")
+                if st.session_state.robot_controller is not None:
+                    try:
+                        st.session_state.robot_controller.move_linear_stage(new_pos)
+                        st.session_state.linear_stage_pos = new_pos
+                        st.success(f"✓ Moved to {new_pos} mm")
+                    except Exception as e:
+                        st.error(f"Failed to move stage: {e}")
+                else:
+                    st.warning("⚠️ Robot controller not initialized")
                 st.rerun()
         
         with col2:
             st.markdown("**xArm Robot:**")
             
             # Display current position
-            coords = st.session_state.robot_coords
-            st.markdown(f"""
-            **Current Position:**
-            - X: {coords['x']} mm
-            - Y: {coords['y']} mm  
-            - Z: {coords['z']} mm
-            - Roll: {coords['roll']}°
-            - Pitch: {coords['pitch']}°
-            - Yaw: {coords['yaw']}°
-            """)
+            current_pos = st.session_state.robot_position
             
-            # Quick positions
-            st.markdown("**Quick Positions:**")
+            # Position sequence: home -> intermediate -> pmt_top
+            position_info = {
+                'home': {'name': 'Initial (Home)', 'icon': '🏠', 'next': 'intermediate', 'prev': None},
+                'intermediate': {'name': 'Intermediate', 'icon': '🔄', 'next': 'pmt_top', 'prev': 'home'},
+                'pmt_top': {'name': 'PMT Top', 'icon': '🔝', 'next': None, 'prev': 'intermediate'}
+            }
             
-            if st.button("🏠 Initial (Home)", key="robot_home", use_container_width=True):
-                st.session_state.robot_position = 'home'
-                st.session_state.robot_coords = {'x': 200, 'y': 0, 'z': 300, 'roll': 0, 'pitch': 0, 'yaw': 0}
-                st.info("Moving to Home...")
+            # Joint angles from xarm_pmt_controller.py
+            ROBOT_JOINT_ANGLES = {
+                'home': [0, 0, 0, 0, 0, -135],              # HOME_TRUE (vertical)
+                'intermediate': [0, -116.5, 5, 0, 0, -135], # HOME (safe intermediate)
+                'pmt_top': [-0.0, -116.812436, -25.177883, 0.0, 51.990269, -135.0]  # PMT_TOP
+            }
+            
+            # Show current position prominently
+            if current_pos in position_info:
+                st.markdown(f"### {position_info[current_pos]['icon']} {position_info[current_pos]['name']}")
+            else:
+                st.markdown(f"### ❓ Unknown Position")
+            
+            # Show joint angles for current position
+            if current_pos in ROBOT_JOINT_ANGLES:
+                angles = ROBOT_JOINT_ANGLES[current_pos]
+                st.caption(f"Joint angles: [{angles[0]:.1f}, {angles[1]:.1f}, {angles[2]:.1f}, {angles[3]:.1f}, {angles[4]:.1f}, {angles[5]:.1f}]")
+            
+            st.markdown("---")
+            st.markdown("**Sequential Position Control:**")
+            st.caption("⚠️ Must move through positions in order for safety")
+            
+            # Position buttons with sequential logic
+            col_a, col_b = st.columns(2)
+            
+            with col_a:
+                # Home button - always accessible
+                if st.button(
+                    "🏠 Initial",
+                    key="robot_home",
+                    use_container_width=True,
+                    disabled=(current_pos == 'home')
+                ):
+                    if st.session_state.robot_controller is not None:
+                        try:
+                            st.session_state.robot_controller.move_to_initial()
+                            st.session_state.robot_position = 'home'
+                            st.success("✓ Moved to Initial position")
+                        except Exception as e:
+                            st.error(f"Failed to move to Initial: {e}")
+                    else:
+                        st.warning("⚠️ Robot controller not initialized")
+                    st.rerun()
+                
+                if current_pos == 'home':
+                    st.caption("✓ At Home")
+                else:
+                    st.caption("⚠️ Return here first")
+            
+            with col_b:
+                # Intermediate button - only from home or pmt_top
+                can_intermediate = current_pos in ['home', 'pmt_top']
+                
+                if st.button(
+                    "🔄 Intermediate",
+                    key="robot_inter",
+                    use_container_width=True,
+                    disabled=(current_pos == 'intermediate' or not can_intermediate)
+                ):
+                    if st.session_state.robot_controller is not None:
+                        try:
+                            st.session_state.robot_controller.move_to_intermediate()
+                            st.session_state.robot_position = 'intermediate'
+                            st.success("✓ Moved to Intermediate position")
+                        except Exception as e:
+                            st.error(f"Failed to move to Intermediate: {e}")
+                    else:
+                        st.warning("⚠️ Robot controller not initialized")
+                    st.rerun()
+                
+                if current_pos == 'intermediate':
+                    st.caption("✓ At Intermediate")
+                elif can_intermediate:
+                    st.caption("→ Next position")
+                else:
+                    st.caption("⊗ Not accessible")
+            
+            # PMT Top button - only from intermediate
+            can_pmt_top = (current_pos == 'intermediate')
+            
+            if st.button(
+                "🔝 PMT Top",
+                key="robot_top",
+                use_container_width=True,
+                disabled=(current_pos == 'pmt_top' or not can_pmt_top)
+            ):
+                if st.session_state.robot_controller is not None:
+                    try:
+                        st.session_state.robot_controller.move_to_pmt_top()
+                        st.session_state.robot_position = 'pmt_top'
+                        st.success("✓ Moved to PMT Top position")
+                    except Exception as e:
+                        st.error(f"Failed to move to PMT Top: {e}")
+                else:
+                    st.warning("⚠️ Robot controller not initialized")
                 st.rerun()
             
-            if st.button("🔄 Intermediate", key="robot_inter", use_container_width=True):
-                st.session_state.robot_position = 'intermediate'
-                st.session_state.robot_coords = {'x': 150, 'y': 100, 'z': 400, 'roll': 0, 'pitch': 45, 'yaw': 0}
-                st.info("Moving to Intermediate...")
-                st.rerun()
+            if current_pos == 'pmt_top':
+                st.caption("✓ At PMT Top")
+            elif can_pmt_top:
+                st.caption("→ Final position")
+            else:
+                st.caption("⊗ Must be at Intermediate first")
             
-            if st.button("🔝 PMT Top", key="robot_top", use_container_width=True):
-                st.session_state.robot_position = 'pmt_top'
-                st.session_state.robot_coords = {'x': 100, 'y': 150, 'z': 500, 'roll': 0, 'pitch': 90, 'yaw': 0}
-                st.info("Moving to PMT Top...")
-                st.rerun()
+            st.markdown("---")
+            
+            # Position sequence diagram
+            st.markdown("**Position Sequence:**")
+            st.code("Home → Intermediate → PMT Top → Intermediate → Home", language="text")
+            
+            st.info("ℹ️ Robot uses safe joint angles (not Cartesian coordinates)")
         
         st.markdown("---")
         
@@ -1893,7 +2080,7 @@ if st.session_state.mode == "Setup & Monitor":
                                 
                                 if success:
                                     # Check what files were created (before organizing)
-                                    waveform_files = st.session_state.digitizer.get_all_waveforms(channels)
+                                    waveform_files = st.session_state.digitizer.get_all_wavefiles(channels)
                                     num_files = len(waveform_files)
                                     
                                     # Organize files
@@ -2249,114 +2436,46 @@ else:
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        # Get available sequences (includes custom ones)
-        available_sequences = get_sequence_list()
+        # Simple sequence selection (no custom for now)
+        sequence_options = [
+            "Dark Current Check (10 min)",
+            "Single PMT Scan (3.5 hours)",
+            "Full PMT Scan (7 hours)"
+        ]
         
         sequence_type = st.selectbox(
             "Sequence Type:",
-            available_sequences,
-            index=available_sequences.index(st.session_state.selected_sequence) if st.session_state.selected_sequence in available_sequences else 0,
+            sequence_options,
             key='sequence_selector'
         )
-        
-        # Update session state when selection changes
-        if sequence_type != st.session_state.selected_sequence:
-            st.session_state.selected_sequence = sequence_type
-        
-        # Use session state value for display
-        sequence_type = st.session_state.selected_sequence
         
         # Show sequence details
         if "Dark Current" in sequence_type:
             st.info("""
             **Dark Current Check:**
-            1. Powers on all PMTs
-            2. Waits for stabilization (5 min)
-            3. Records baseline without signal
-            4. Checks for excessive dark current
+            - Python script: `dark_current_scan.py`
+            - Measures baseline noise for all 3 PMTs
+            - Duration: 5 minutes
+            - No light source (laser off)
             """)
-            
-            # Option to view waveforms during dark current check
-            view_waveforms = st.checkbox("Enable waveform viewing during acquisition")
-            if view_waveforms:
-                st.caption("💡 Waveforms will be displayed in real-time during the dark current check")
         
         elif "Single PMT" in sequence_type:
-            # Only PMT1 and PMT2 are accessible (PMT3 is monitor only)
-            pmt_select = st.selectbox("Select PMT:", ["PMT 1", "PMT 2"])
+            pmt_select = st.selectbox("Select PMT:", ["PMT 1", "PMT 2"], key="single_pmt_select")
             st.info(f"""
-            **Single PMT Test - {pmt_select}:**
-            1. Powers on selected PMT
-            2. Moves robot to position
-            3. Configures signal generator & laser
-            4. Acquires data for specified runtime
-            5. Analyzes waveforms
-            
-            Note: PMT3 is a monitor PMT and not accessible by robot
+            **Single PMT Scan - {pmt_select}:**
+            - Python script: `single_pmt_scan.py`
+            - Scans one PMT at multiple angles
+            - Robot moves through zenith/azimuth positions
+            - Estimated time: ~30 minutes
             """)
         
         elif "Full PMT Scan" in sequence_type:
             st.info("""
             **Full PMT Scan:**
-            1. Dark current check (5 min)
-            2. For each accessible PMT (1, 2):
-               - Move robot to position
-               - Configure signal generator & laser
-               - Scan zenith: 0°, 30°, 60°, 90°
-               - Scan azimuth: 0°, 90°, 180°, 270°
-               - Record data at each position
-            3. Return robot to home
-            4. Power down safely
-            
-            **Total positions:** 24 (2 PMTs × 4 zenith × 3 azimuth)
-            **Estimated time:** 2 hours
-            
-            Note: PMT3 operates as monitor only
-            """)
-        
-        elif "Custom:" in sequence_type:
-            # Load saved custom sequence
-            custom_name = sequence_type.replace("Custom: ", "")
-            config = st.session_state.custom_sequences[custom_name]
-            
-            st.success(f"Loaded custom sequence: **{custom_name}**")
-            st.json(config)
-            
-            if st.button("🗑️ Delete This Sequence", key="delete_custom"):
-                del st.session_state.custom_sequences[custom_name]
-                st.success(f"Deleted sequence: {custom_name}")
-                st.rerun()
-        
-        elif "Create New Custom" in sequence_type:
-            st.markdown("**Create Custom Scan:**")
-            
-            # Name the custom sequence
-            custom_seq_name = st.text_input("Sequence Name:", 
-                                           placeholder="e.g., Quick Zenith Scan",
-                                           key="custom_name")
-            
-            col_a, col_b = st.columns(2)
-            with col_a:
-                # Only PMT1 and PMT2 selectable
-                pmts_to_scan = st.multiselect("PMTs:", ["PMT 1", "PMT 2"], default=["PMT 1"])
-                st.caption("PMT 3 is monitor-only")
-                zenith_angles = st.text_input("Zenith (°):", value="0, 30, 60, 90")
-            with col_b:
-                azimuth_angles = st.text_input("Azimuth (°):", value="0, 90, 180, 270")
-                runtime_per_pos = st.number_input("Runtime/Position (s):", value=60, step=10)
-            
-            # Calculate estimated time
-            n_pmts = len(pmts_to_scan)
-            n_zenith = len([x.strip() for x in zenith_angles.split(',') if x.strip()])
-            n_azimuth = len([x.strip() for x in azimuth_angles.split(',') if x.strip()])
-            total_positions = n_pmts * n_zenith * n_azimuth
-            estimated_time_min = (runtime_per_pos * total_positions) / 60
-            
-            st.info(f"""
-            **Estimated scan:**
-            - Total positions: {total_positions}
-            - Time per position: {runtime_per_pos}s
-            - Estimated total time: {estimated_time_min:.1f} minutes
+            - Python script: `full_pmt_scan.py`
+            - Scans both PMT1 and PMT2
+            - Complete angular characterization
+            - Estimated time: 2 hours
             """)
     
     with col2:
@@ -2389,11 +2508,22 @@ else:
     
     st.markdown("---")
     
-    # Run Control - Start only enabled when all systems ready
-    col1, col2, col3, col4 = st.columns(4)
+    # Run Control - Launch external Python scripts
+    st.subheader("Run Control")
     
-    # Check if all required systems are ready AND both PMT serial numbers are entered
+    # Determine which script to run
+    script_map = {
+        "Dark Current Check (5 min)": "dark_current_scan.py",
+        "Single PMT Scan": "single_pmt_scan.py",
+        "Full PMT Scan (2 hours)": "full_pmt_scan.py"
+    }
+    
+    script_name = script_map.get(sequence_type, None)
+    
+    # Check if all required systems are ready AND PMT serial numbers entered
     can_start = all_systems_ready and bool(st.session_state.pmt_serial_number["pmt1"]) and bool(st.session_state.pmt_serial_number["pmt2"])
+    
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         if not st.session_state.run_active:
@@ -2401,46 +2531,61 @@ else:
                         use_container_width=True, 
                         type="primary",
                         disabled=not can_start):
-                if can_start:
-                    st.session_state.run_active = True
-                    st.session_state.run_progress = 0
-                    st.success("Run started!")
-                    st.rerun()
-                else:
-                    st.error("Check system status and PMT serial number!")
+                if can_start and script_name:
+                    # Prepare command arguments
+                    import subprocess
+                    
+                    cmd = ["python3", script_name]
+                    cmd.extend(["--pmt1", st.session_state.pmt_serial_number["pmt1"]])
+                    cmd.extend(["--pmt2", st.session_state.pmt_serial_number["pmt2"]])
+                    
+                    # Add single PMT selection if applicable
+                    if "Single PMT" in sequence_type:
+                        pmt_num = "1" if pmt_select == "PMT 1" else "2"
+                        cmd.extend(["--pmt-select", pmt_num])
+                    
+                    # Add schedule if set
+                    if st.session_state.scheduled_start:
+                        cmd.extend(["--schedule", st.session_state.scheduled_start.isoformat()])
+                    
+                    # Launch script in background
+                    try:
+                        st.session_state.run_process = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True
+                        )
+                        st.session_state.run_active = True
+                        st.session_state.run_script = script_name
+                        st.success(f"✓ Started {script_name}")
+                        st.info(f"📁 Logs will be saved to: `/logs/{run_name}.log`")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to start script: {e}")
     
     with col2:
         if st.session_state.run_active:
-            if st.button("⏸ Pause", use_container_width=True):
-                st.warning("Run paused")
+            if st.button("⏸ Pause", use_container_width=True, disabled=True):
+                st.caption("⚠️ Pause not supported")
     
     with col3:
         if st.session_state.run_active:
             if st.button("⏹ Stop", use_container_width=True):
+                # Terminate the running script
+                if hasattr(st.session_state, 'run_process'):
+                    st.session_state.run_process.terminate()
                 st.session_state.run_active = False
                 st.session_state.run_progress = 0
-                st.info("Run stopped")
+                st.warning("⏹ Run stopped")
                 st.rerun()
     
     with col4:
-        # Save custom sequence - only show for custom scans
-        if "Create New Custom" in sequence_type:
-            if st.button("💾 Save Sequence", use_container_width=True):
-                if custom_seq_name:
-                    # Save the custom sequence configuration
-                    config = {
-                        'pmts': pmts_to_scan,
-                        'zenith': zenith_angles,
-                        'azimuth': azimuth_angles,
-                        'runtime_per_pos': runtime_per_pos,
-                        'created': datetime.now().strftime('%Y-%m-%d %H:%M')
-                    }
-                    save_custom_sequence(custom_seq_name, config)
-                    st.success(f"Saved: {custom_seq_name}")
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    st.error("Please enter a sequence name")
+        # Show log viewer button when running
+        if st.session_state.run_active:
+            if st.button("📋 View Logs", use_container_width=True):
+                st.session_state.show_logs = True
     
     if not can_start and not st.session_state.run_active:
         reasons = []
@@ -2452,6 +2597,45 @@ else:
             reasons.append("Enter PMT2 serial number")
         
         st.warning(f"⚠️ System not ready: {', '.join(reasons)}")
+    
+    # Live status display when running
+    if st.session_state.run_active:
+        st.markdown("---")
+        st.subheader("Run Status")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Script", st.session_state.get('run_script', 'Unknown'))
+        with col2:
+            st.metric("Status", "Running")
+        with col3:
+            # Check if process still alive
+            if hasattr(st.session_state, 'run_process'):
+                if st.session_state.run_process.poll() is None:
+                    st.metric("Process", "Active")
+                else:
+                    st.metric("Process", "Complete")
+                    st.session_state.run_active = False
+        
+        # Show live logs if requested
+        if st.session_state.get('show_logs', False):
+            with st.expander("📋 Live Output", expanded=True):
+                if hasattr(st.session_state, 'run_process'):
+                    # Read available output
+                    import select
+                    try:
+                        # Non-blocking read
+                        if select.select([st.session_state.run_process.stdout], [], [], 0)[0]:
+                            output = st.session_state.run_process.stdout.readline()
+                            if output:
+                                st.text(output.strip())
+                    except:
+                        st.caption("No output available")
+                
+                if st.button("✖ Close Logs"):
+                    st.session_state.show_logs = False
+                    st.rerun()
     
     # Progress Display
     if st.session_state.run_active or st.session_state.run_progress > 0:

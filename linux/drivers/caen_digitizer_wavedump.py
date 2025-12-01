@@ -159,6 +159,7 @@ class CAENDigitizerWaveDump:
         self,
         run_duration: int,
         channels: List[int],
+        output_format: str = 'ASCII',  # 'ASCII' or 'BINARY'
         record_length: Optional[int] = None,
         post_trigger: Optional[int] = None,
         trigger_channel: Optional[int] = None,
@@ -211,7 +212,14 @@ class CAENDigitizerWaveDump:
                     lines[i] = f"POST_TRIGGER  {post_trigger}\n"
                     logger.debug(f"  Set POST_TRIGGER to {post_trigger}%")
                     break
-        
+
+        # Set output file format
+        for i, line in enumerate(lines):
+            if 'OUTPUT_FILE_FORMAT' in line:
+                lines[i] = f"OUTPUT_FILE_FORMAT    {output_format}\n"
+                logger.info(f"Set output format to {output_format}")
+                break
+                
         # Enable/disable channels and set trigger parameters
         channel_sections = self._find_channel_sections(lines)
         
@@ -283,7 +291,7 @@ class CAENDigitizerWaveDump:
             if stripped.startswith('[') and stripped.endswith(']'):
                 # Save previous channel section
                 if current_channel is not None and section_start is not None:
-                    channel_sections[current_channel] = (section_start, i)
+                    channel_sections[current_channel] = (section_start, i-1)
                 
                 # Start new channel section
                 try:
@@ -428,29 +436,30 @@ class CAENDigitizerWaveDump:
     # Data Retrieval
     # =========================================================================
     
-    def get_waveform(self, channel: int) -> Optional[Path]:
+    def get_wavefile(self, channel: int) -> Optional[Path]:
         """
-        Check if waveform file exists for a channel.
-        
-        Returns the file path if it exists. Actual parsing/analysis
-        should be done by separate offline tools.
+        Get waveform file for a specific channel.
+        Checks for both ASCII (.txt) and binary (.dat) formats.
         
         Args:
-            channel: Channel number (0-7)
+            channel: Channel number
             
         Returns:
-            Path to waveform file if exists, None otherwise
+            Path to waveform file, or None if not found
         """
-        wave_file = self.working_dir / f"wave{channel}.txt"
+        # Try both ASCII and binary formats
+        txt_file = self.working_dir / f"wave{channel}.txt"
+        dat_file = self.working_dir / f"wave{channel}.dat"
         
-        if wave_file.exists():
-            logger.debug(f"Ch{channel}: Waveform file found at {wave_file}")
-            return wave_file
+        if txt_file.exists():
+            return txt_file
+        elif dat_file.exists():
+            return dat_file
         else:
-            logger.debug(f"Ch{channel}: Waveform file not found")
+            logger.warning(f"Waveform file for channel {channel} not found (tried .txt and .dat)")
             return None
     
-    def get_all_waveforms(self, channels: List[int]) -> Dict[int, Path]:
+    def get_all_wavefiles(self, channels: List[int]) -> Dict[int, Path]:
         """
         Check which waveform files exist for given channels.
         
@@ -465,7 +474,7 @@ class CAENDigitizerWaveDump:
         waveform_files = {}
         
         for ch in channels:
-            wave_file = self.get_waveform(ch)
+            wave_file = self.get_wavefile(ch)
             if wave_file is not None:
                 waveform_files[ch] = wave_file
         
@@ -573,7 +582,7 @@ if __name__ == "__main__":
     
     if success:
         # Get waveforms
-        waveforms = digitizer.get_all_waveforms([2, 3, 4])
+        waveforms = digitizer.get_all_wavefiles([2, 3, 4])
         
         # Organize files
         digitizer.organize_files(

@@ -205,13 +205,6 @@ class XArmPMTController:
         
         logger.info(f"Moving to scan point: θ={zenith}°, φ={azimuth}°")
         
-        # For high zenith angles, use buffer positions
-        if zenith >= 40:
-            # Determine if we should reverse buffer sequence
-            # (optimization for movement efficiency)
-            reverse = (azimuth % 180 != 0)
-            self._move_through_buffers(azimuth, reverse=reverse)
-        
         # Move to target position
         target_angles = self._rotate_base(self.joint_angles[zenith], azimuth)
         self.move_to_position(target_angles)
@@ -238,7 +231,7 @@ class XArmPMTController:
         self,
         pmt1_serial: str,
         pmt2_serial: str,
-        duration: int = 300,
+        duration: int = 600,
         progress_callback: Optional[Callable] = None
     ) -> dict:
         """
@@ -292,7 +285,7 @@ class XArmPMTController:
         if progress_callback:
             progress_callback(85, "Reading waveform data...")
         
-        waveforms = self.digitizer.get_all_waveforms(channels)
+        waveforms = self.digitizer.get_all_wavefiles(channels)
         
         # Organize files
         if progress_callback:
@@ -370,13 +363,17 @@ class XArmPMTController:
         self.move_to_intermediate()
         
         # Scan loop
-        total_points = len(zeniths) * len(azimuths)
+        total_points = (len(zeniths[1:]) * len(azimuths))+1
         current_point = 0
         visited_zero = False
         
+        Urob_change = 35  # Robot configuration change angle (degrees)
+
         for i, azimuth in enumerate(azimuths):
             # Alternate zenith direction for efficiency
             zen_list = zeniths if i % 2 == 0 else list(reversed(zeniths))
+            
+            passed_rob_change = False  # Reset flag for each azimuth
             
             for zenith in zen_list:
                 # Skip duplicate zenith=0 (independent of azimuth)
@@ -386,13 +383,38 @@ class XArmPMTController:
                         continue
                     visited_zero = True
                 
-                # Move to scan point
+                # Check if crossing robot configuration threshold (only once per azimuth)
+                if i % 2 == 0:  # Even index: going UP (0 -> 10 -> 20 -> 30 -> 35 -> 40 -> 50)
+                    if zenith >= Urob_change and not passed_rob_change:
+                        passed_rob_change = True
+                        logger.info(f"Crossing robot config threshold (going up) at θ={zenith}°, φ={azimuth}°")
+                        # Use buffer positions (forward order)
+                        for buffer in self.buffer_positions:
+                            rotated_buffer = self._rotate_base(buffer, azimuth)
+                            self.move_to_position(rotated_buffer)
+                else:  # Odd index: going DOWN (50 -> 40 -> 35 -> 30 -> 20 -> 10 -> 0)
+                    if zenith <= Urob_change and not passed_rob_change:
+                        passed_rob_change = True
+                        logger.info(f"Crossing robot config threshold (going down) at θ={zenith}°, φ={azimuth}°")
+                        # Use buffer positions (reverse order)
+                        for buffer in reversed(self.buffer_positions):
+                            rotated_buffer = self._rotate_base(buffer, azimuth)
+                            self.move_to_position(rotated_buffer)
+                
+                # Move to scan point (without automatic buffer handling)
                 position_name = f"θ={zenith}°, φ={azimuth}°"
                 if progress_callback:
                     progress_pct = int((current_point / total_points) * 100)
                     progress_callback(progress_pct, f"PMT{pmt_number} - {position_name}", position_name)
                 
-                self.move_to_scan_point(zenith, azimuth)
+                # Move directly to target position
+                target_angles = self._rotate_base(self.joint_angles[zenith], azimuth)
+                self.move_to_position(target_angles)
+                
+                # Stabilization delay
+                time.sleep(3)
+                
+                logger.debug(f"✓ At scan point: θ={zenith}°, φ={azimuth}°")
                 
                 # Configure and acquire
                 self.digitizer.configure(run_duration=daq_runtime, channels=channels)
