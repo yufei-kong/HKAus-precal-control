@@ -601,8 +601,6 @@ if 'pmt_serial_number' not in st.session_state:
     st.session_state.pmt_serial_number = {"pmt1": "", "pmt2": ""}
 if 'laser_trigger_mode' not in st.session_state:
     st.session_state.laser_trigger_mode = "EXT"
-if 'selected_sequence' not in st.session_state:
-    st.session_state.selected_sequence = "Dark Current Check (5 min)"
 
 if 'cleanup_registered' not in st.session_state:
     
@@ -2508,89 +2506,109 @@ else:
     
     st.markdown("---")
     
-    # Run Control - Launch external Python scripts
+    # Run Control - Use built-in functions
     st.subheader("Run Control")
-    
-    # Determine which script to run
-    script_map = {
-        "Dark Current Check (5 min)": "dark_current_scan.py",
-        "Single PMT Scan": "single_pmt_scan.py",
-        "Full PMT Scan (2 hours)": "full_pmt_scan.py"
-    }
-    
-    script_name = script_map.get(sequence_type, None)
-    
-    # Check if all required systems are ready AND PMT serial numbers entered
-    can_start = all_systems_ready and bool(st.session_state.pmt_serial_number["pmt1"]) and bool(st.session_state.pmt_serial_number["pmt2"])
-    
+
+    # Check if all required systems are ready
+    system_ready = (
+        st.session_state.system_coordinator is not None and
+        bool(st.session_state.pmt_serial_number["pmt1"]) and
+        bool(st.session_state.pmt_serial_number["pmt2"])
+    )
+
     col1, col2, col3, col4 = st.columns(4)
-    
+
     with col1:
         if not st.session_state.run_active:
             if st.button("▶ Start Run", 
                         use_container_width=True, 
                         type="primary",
-                        disabled=not can_start):
-                if can_start and script_name:
-                    # Prepare command arguments
-                    import subprocess
+                        disabled=not system_ready):
+                if system_ready:
+                    # Check if scheduled start is in the future
+                    if st.session_state.scheduled_start and st.session_state.scheduled_start > datetime.now():
+                        st.info(f"⏱️ Waiting until {st.session_state.scheduled_start.strftime('%Y-%m-%d %H:%M')}")
+                        # In a real implementation, you'd start a background thread here
+                        # For now, just show the message
+                        st.warning("⚠️ Scheduled runs not yet implemented - starting immediately")
                     
-                    cmd = ["python3", script_name]
-                    cmd.extend(["--pmt1", st.session_state.pmt_serial_number["pmt1"]])
-                    cmd.extend(["--pmt2", st.session_state.pmt_serial_number["pmt2"]])
+                    st.session_state.run_active = True
                     
-                    # Add single PMT selection if applicable
-                    if "Single PMT" in sequence_type:
-                        pmt_num = "1" if pmt_select == "PMT 1" else "2"
-                        cmd.extend(["--pmt-select", pmt_num])
-                    
-                    # Add schedule if set
-                    if st.session_state.scheduled_start:
-                        cmd.extend(["--schedule", st.session_state.scheduled_start.isoformat()])
-                    
-                    # Launch script in background
                     try:
-                        st.session_state.run_process = subprocess.Popen(
-                            cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True
-                        )
-                        st.session_state.run_active = True
-                        st.session_state.run_script = script_name
-                        st.success(f"✓ Started {script_name}")
-                        st.info(f"📁 Logs will be saved to: `/logs/{run_name}.log`")
-                        time.sleep(1)
-                        st.rerun()
+                        # Note: Progress callback not implemented yet
+                        # For now, runs will execute without progress updates
+                        
+                        if "Dark Current" in sequence_type:
+                            result = st.session_state.system_coordinator.run_dark_current_check(
+                                pmt1_serial=st.session_state.pmt_serial_number["pmt1"],
+                                pmt2_serial=st.session_state.pmt_serial_number["pmt2"],
+                                duration=300,  # 5 minutes
+                                progress_callback=None  # TODO: Implement progress callback
+                            )
+                            
+                        elif "Single PMT" in sequence_type:
+                            # Get PMT selection
+                            pmt_num = 1 if pmt_select == "PMT 1" else 2
+                            pmt_serial = st.session_state.pmt_serial_number[f"pmt{pmt_num}"]
+                            
+                            result = st.session_state.system_coordinator.run_single_pmt_scan(
+                                pmt_number=pmt_num,
+                                serial=pmt_serial,
+                                zeniths=[0, 10, 20, 30, 40, 50],
+                                azimuths=[0, 90, 180, 270],
+                                daq_runtime=5,  # seconds per point
+                                progress_callback=None  # TODO: Implement progress callback
+                            )
+                            
+                        elif "Full PMT Scan" in sequence_type:
+                            result = st.session_state.system_coordinator.run_full_scan(
+                                pmt1_serial=st.session_state.pmt_serial_number["pmt1"],
+                                pmt2_serial=st.session_state.pmt_serial_number["pmt2"],
+                                zeniths=[0, 10, 20, 30, 40, 50],
+                                azimuths=[0, 90, 180, 270],
+                                daq_runtime=5,  # seconds per point
+                                progress_callback=None  # TODO: Implement progress callback
+                            )
+                        
+                        # Check result
+                        if result.get('status') == 'success':
+                            st.success(f"✓ {sequence_type} completed successfully!")
+                        else:
+                            st.error(f"✗ {sequence_type} failed: {result.get('error', 'Unknown error')}")
+                        
+                        st.session_state.run_active = False
+                        
                     except Exception as e:
-                        st.error(f"Failed to start script: {e}")
-    
+                        st.error(f"Run sequence failed: {e}")
+                        st.session_state.run_active = False
+                    
+                    st.rerun()
+
     with col2:
         if st.session_state.run_active:
             if st.button("⏸ Pause", use_container_width=True, disabled=True):
                 st.caption("⚠️ Pause not supported")
-    
+
     with col3:
         if st.session_state.run_active:
             if st.button("⏹ Stop", use_container_width=True):
-                # Terminate the running script
-                if hasattr(st.session_state, 'run_process'):
-                    st.session_state.run_process.terminate()
+                # Note: Currently can't stop a running sequence gracefully
                 st.session_state.run_active = False
                 st.session_state.run_progress = 0
-                st.warning("⏹ Run stopped")
+                st.warning("⏹ Run marked as stopped (actual scan may continue)")
                 st.rerun()
-    
+
     with col4:
-        # Show log viewer button when running
+        # View Logs button (not functional without subprocess)
         if st.session_state.run_active:
-            if st.button("📋 View Logs", use_container_width=True):
-                st.session_state.show_logs = True
-    
-    if not can_start and not st.session_state.run_active:
+            if st.button("📋 View Logs", use_container_width=True, disabled=True):
+                st.caption("⚠️ Logs not available (no subprocess)")
+
+    # Show readiness status
+    if not system_ready and not st.session_state.run_active:
         reasons = []
-        if not all_systems_ready:
-            reasons.append("Enable all required devices")
+        if st.session_state.system_coordinator is None:
+            reasons.append("System coordinator not initialized")
         if not st.session_state.pmt_serial_number["pmt1"]:
             reasons.append("Enter PMT1 serial number")
         if not st.session_state.pmt_serial_number["pmt2"]:
