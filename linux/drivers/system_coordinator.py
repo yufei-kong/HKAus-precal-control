@@ -19,8 +19,8 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(script_dir)
 sys.path.insert(0, parent_dir)
 # Local imports
-from xarm_pmt_controller import XArmPMTController
-from caen_digitizer_wavedump import CAENDigitizerWaveDump
+from drivers.xarm_pmt_controller import XArmPMTController
+from drivers.caen_digitizer_wavedump import CAENDigitizerWaveDump
 from api_client.device_api_client import WindowsDeviceClient
 
 

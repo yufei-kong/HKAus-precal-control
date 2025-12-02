@@ -24,7 +24,6 @@ import atexit
 script_dir = Path(__file__).parent  # gui/
 linux_dir = script_dir.parent        # linux/
 
-
 # Add linux directory to path so we can do "import drivers.xxx"
 sys.path.insert(0, str(linux_dir))
 
@@ -630,6 +629,13 @@ if 'cleanup_registered' not in st.session_state:
                 cleaned.append("✓ Digitizer: Temp files cleaned")
             except Exception as e:
                 cleaned.append(f"⚠ Digitizer: {e}")
+
+        if _robot_controller is not None:
+            try:
+                _robot_controller.arm.disconnect()
+                cleaned.append("✓ xArm: Connection closed (position unchanged)")
+            except Exception as e:
+                cleaned.append(f"⚠ xArm: {e}")
         
         # Note: Robot, HV, laser, etc. remain in current state
         # Use Emergency Stop button if you need to shut down hardware

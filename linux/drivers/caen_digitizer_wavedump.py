@@ -42,8 +42,8 @@ class CAENDigitizerWaveDump:
     
     def __init__(
         self,
-        wavedump_path: str = "/usr/local/bin/WaveDump",
-        config_template: str = "configs/WaveDumpConfig_template.txt",
+        wavedump_path="/home/hyperkaus/CAEN/wavedump-3.10.6-augmented/src/wavedump",
+        config_template="./configs/wavedumpconfig_template.txt",
         working_dir: Optional[str] = None,
         kernel_module_required: bool = True
     ):
