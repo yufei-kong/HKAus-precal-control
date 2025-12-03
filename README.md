@@ -151,27 +151,31 @@ HKAus-precal-control/
 
 ```
 HKAus-precal-control/
-├── README.md
 ├── docs
 │   ├── API_REFERENCE.md
 │   ├── ARCHITECTURE.md
 │   └── DEVICE_SPECIFICATIONS.md
 ├── linux
-│   ├── xArm-Python-SDK
-│   │   └── xarm
 │   ├── api_client
 │   │   └── device_api_client.py
 │   ├── configs
 │   │   ├── config_source_deployment.txt
-│   │   └── dark_current_config.txt
+│   │   ├── dark_current_config.txt
+│   │   └── wavedumpconfig_template.txt
 │   ├── drivers
-│   │   └── xarm_DAQ_minimal.py
-│   ├── scripts
-│   │   └── test_api_client.py
+│   │   ├── caen_digitizer_wavedump.py
+│   │   ├── sipm_ips2303s.py
+│   │   ├── system_coordinator.py
+│   │   └── xarm_pmt_controller.py
 │   ├── gui
-│   │   └── hyperk_daq_gui_v4.py
+│   │   └── hyperk_daq_gui.py
 │   ├── README.md
-│   └── requirements.txt
+│   ├── requirements.txt
+│   └── scripts
+│       ├── test_api_client.py
+│       ├── test_digitizer.py
+│       └── test_sipm_firmware_bug.py
+├── README.md
 └── windows
     ├── api_server
     │   └── device_api_server.py
