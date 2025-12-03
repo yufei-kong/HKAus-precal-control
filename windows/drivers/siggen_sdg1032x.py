@@ -250,7 +250,44 @@ class SiglentSDG1032X:
     # ========================================================================
     # Status Queries
     # ========================================================================
-    
+
+    def query_output_state(self, channel: int) -> bool:
+        """
+        Query the actual output state from device using SCPI command.
+        
+        Args:
+            channel: Channel number (1 or 2)
+            
+        Returns:
+            True if output is ON, False if OFF
+        """
+        self._ensure_connected()
+        
+        try:
+            # Send SCPI query command
+            if channel == 1:
+                reply = self.device.internal_socketSend(b'C1:OUTP?')
+            elif channel == 2:
+                reply = self.device.internal_socketSend(b'C2:OUTP?')
+            else:
+                raise ValueError("Channel must be 1 or 2")
+            
+            # Parse reply - format: "C1:OUTP OFF,..." or "C1:OUTP ON,..."
+            reply_str = reply.decode('ascii').strip().upper()
+            
+            # The output state is right after "OUTP "
+            if 'OUTP ON' in reply_str.split(',')[0]:
+                return True
+            elif 'OUTP OFF' in reply_str.split(',')[0]:
+                return False
+            else:
+                logger.warning(f"Unexpected reply format: {reply_str}")
+                return False
+            
+        except Exception as e:
+            logger.error(f"Failed to query output state: {e}")
+            raise
+        
     def get_current_params(self, channel: int) -> dict:
         """
         Get all current parameters for channel from the device
@@ -319,12 +356,7 @@ class SiglentSDG1032X:
     
     def get_output_state(self, channel: int) -> bool:
         """Get current output state for channel"""
-        params = self.get_current_params(channel)
-        # Check if output is enabled - may need to query separately
-        # The getCurrentParams may not have output state, so we'll assume it's available
-        output_list = params.get('OUTPUT', ['OFF'])
-        output_str = self._extract_value(output_list, 'OFF')
-        return output_str.upper() in ['ON', '1', 'ENABLED']
+        return self.query_output_state(channel)
     
     def get_status(self, channel: int) -> dict:
         """
