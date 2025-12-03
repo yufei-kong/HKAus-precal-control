@@ -592,6 +592,23 @@ if 'device_enabled' not in st.session_state:
         'laser': False,
         'robot': False
     }
+
+# Sync device states from actual hardware on first load (AFTER device_enabled exists)
+if 'device_states_synced' not in st.session_state:
+    st.session_state.device_states_synced = False
+    
+    # Sync signal generator state from device
+    if st.session_state.get('api_client'):
+        try:
+            status = st.session_state.api_client.siggen_get_status(1)
+            st.session_state.device_enabled['siggen'] = status.get('output_enabled', False)
+            print(f"Synced siggen state: {st.session_state.device_enabled['siggen']}")
+        except Exception as e:
+            print(f"Failed to sync siggen state: {e}")
+            st.session_state.device_enabled['siggen'] = False
+    
+    st.session_state.device_states_synced = True
+
 if 'emergency_stop_confirm' not in st.session_state:
     st.session_state.emergency_stop_confirm = False
 if 'custom_sequences' not in st.session_state:
@@ -731,7 +748,7 @@ with st.sidebar:
 
     st.markdown(f"{status_dot(sipm_status)} SiPM Supply", unsafe_allow_html=True)
     
-    # Signal Gen
+    # Signal Gen - use session state (synced on changes)
     siggen_status = 'green' if st.session_state.device_enabled['siggen'] else 'red'
     st.markdown(f"{status_dot(siggen_status)} Signal Generator", unsafe_allow_html=True)
     
@@ -1344,6 +1361,8 @@ if st.session_state.mode == "Setup & Monitor":
         else:
             try:
                 channel = 1  # We typically use channel 1
+                
+                # Refresh status after any changes
                 status = st.session_state.api_client.siggen_get_status(channel)
                 
                 col1, col2 = st.columns([2, 1])
@@ -1351,10 +1370,18 @@ if st.session_state.mode == "Setup & Monitor":
                 with col1:
                     st.markdown("**Waveform Configuration:**")
                     
+                    # Map device waveform to selectbox index
+                    waveform_options = ["SINE", "SQUARE", "PULSE", "RAMP", "NOISE"]
+                    current_waveform = status.get('waveform', 'PULSE')
+                    try:
+                        waveform_index = waveform_options.index(current_waveform)
+                    except ValueError:
+                        waveform_index = 2  # Default to PULSE if unknown
+                    
                     waveform = st.selectbox(
                         "Waveform:",
-                        ["SINE", "SQUARE", "PULSE", "RAMP", "NOISE"],
-                        index=2,  # Default to PULSE
+                        waveform_options,
+                        index=waveform_index,  # Use actual device value
                         key="siggen_wave_type"
                     )
                     
@@ -1362,7 +1389,7 @@ if st.session_state.mode == "Setup & Monitor":
                         "Frequency (Hz)",
                         min_value=1.0,
                         max_value=30000000.0,
-                        value=1000.0,
+                        value=float(status.get('frequency', 1000.0)),  # Use actual device value
                         format="%.1f",
                         key="siggen_freq"
                     )
@@ -1371,7 +1398,7 @@ if st.session_state.mode == "Setup & Monitor":
                         "Amplitude (V)",
                         min_value=0.0,
                         max_value=10.0,
-                        value=3.3,
+                        value=float(status.get('amplitude', 5.5)),  # Use actual device value
                         step=0.1,
                         key="siggen_amp"
                     )
@@ -1380,7 +1407,7 @@ if st.session_state.mode == "Setup & Monitor":
                         "Offset (V)",
                         min_value=-5.0,
                         max_value=5.0,
-                        value=0.0,
+                        value=float(status.get('offset', 2.0)),  # Use actual device value
                         step=0.1,
                         key="siggen_offset"
                     )
@@ -1390,7 +1417,7 @@ if st.session_state.mode == "Setup & Monitor":
                             "Pulse Width (ns)",
                             min_value=8.0,
                             max_value=1000000.0,
-                            value=100.0,
+                            value=32.6,
                             step=1.0,
                             key="siggen_pulse_width"
                         )
@@ -1406,7 +1433,7 @@ if st.session_state.mode == "Setup & Monitor":
                     st.markdown("**Status:**")
                     st.write(" ")
                     
-                    # Output status indicator
+                    # Get fresh output status from API
                     output_on = status.get('output_enabled', False)
                     if output_on:
                         st.markdown(f"{status_dot('green')} Output ON", unsafe_allow_html=True)
@@ -1427,9 +1454,9 @@ if st.session_state.mode == "Setup & Monitor":
                         ):
                             try:
                                 st.session_state.api_client.siggen_enable_output(channel, True)
-                                st.session_state.device_enabled['siggen'] = True
+                                st.session_state.device_enabled['siggen'] = True  # Sync session state
+                                time.sleep(1.0)  # Wait for device to update
                                 st.success("✓ Output enabled")
-                                time.sleep(0.5)
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Failed to enable: {e}")
@@ -1443,9 +1470,9 @@ if st.session_state.mode == "Setup & Monitor":
                         ):
                             try:
                                 st.session_state.api_client.siggen_enable_output(channel, False)
-                                st.session_state.device_enabled['siggen'] = False
+                                st.session_state.device_enabled['siggen'] = False  # Sync session state
+                                time.sleep(1.0)  # Wait for device to update
                                 st.info("✓ Output disabled")
-                                time.sleep(0.5)
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Failed to disable: {e}")
@@ -2709,27 +2736,6 @@ else:
 [{datetime.now().strftime('%H:%M:%S')}] Position complete, organizing files by PMT serial number
 [{datetime.now().strftime('%H:%M:%S')}] Moving to next position...
             """)
-        
-        # Waveform viewer for Dark Current Check
-        if "Dark Current" in sequence_type and view_waveforms:
-            with st.expander("📊 Live Waveforms", expanded=True):
-                # Mock waveform display
-                st.caption("Real-time waveform display during dark current measurement")
-                
-                # Generate mock waveform data
-                x = np.linspace(0, 1000, 1000)
-                noise = np.random.normal(0, 5, 1000)
-                baseline = np.zeros(1000) + 100
-                waveform = baseline + noise
-                
-                # Create simple chart
-                chart_data = pd.DataFrame({
-                    'Time (ns)': x,
-                    'ADC': waveform
-                })
-                st.line_chart(chart_data.set_index('Time (ns)'))
-                
-                st.caption("Mean: 100.2 ADC | RMS: 4.8 ADC | Events: 1,234")
     
     st.markdown("---")
     
