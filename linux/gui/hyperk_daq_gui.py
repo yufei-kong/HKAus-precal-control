@@ -606,6 +606,21 @@ if 'device_states_synced' not in st.session_state:
         except Exception as e:
             print(f"Failed to sync siggen state: {e}")
             st.session_state.device_enabled['siggen'] = False
+        
+        # Sync PMT HV state from device
+        try:
+            # Check if any PMT channel is on
+            any_on = False
+            for ch in range(1, 4):
+                status = st.session_state.api_client.caen_get_status(ch)
+                if status.get('power_on', False):
+                    any_on = True
+                    break
+            st.session_state.device_enabled['pmt_hv'] = any_on
+            print(f"Synced PMT HV state: {st.session_state.device_enabled['pmt_hv']}")
+        except Exception as e:
+            print(f"Failed to sync PMT HV state: {e}")
+            st.session_state.device_enabled['pmt_hv'] = False
     
     st.session_state.device_states_synced = True
 
@@ -2268,11 +2283,30 @@ else:
             use_container_width=True,
             key='toggle_pmt'
         ):
-            st.session_state.device_enabled['pmt_hv'] = not st.session_state.device_enabled['pmt_hv']
-            if st.session_state.device_enabled['pmt_hv']:
-                st.session_state.pmt_power = [True, True, True]
-            else:
-                st.session_state.pmt_power = [False, False, False]
+            if st.session_state.get('api_client'):
+                try:
+                    # Toggle all PMT channels
+                    new_state = not st.session_state.device_enabled['pmt_hv']
+                    
+                    if new_state:
+                        # Turn ON all PMT channels
+                        for ch_num in range(1, 4):
+                            v_set = st.session_state.pmt_voltages[ch_num-1]
+                            st.session_state.api_client.caen_set_voltage(ch_num, v_set)
+                            st.session_state.api_client.caen_set_power(ch_num, True)
+                            st.session_state.caen_channels[ch_num]['power_on'] = True
+                            st.session_state.caen_channels[ch_num]['v_set'] = v_set
+                        st.session_state.device_enabled['pmt_hv'] = True
+                        st.session_state.pmt_power = [True, True, True]
+                    else:
+                        # Turn OFF all PMT channels
+                        for ch_num in range(1, 4):
+                            st.session_state.api_client.caen_set_power(ch_num, False)
+                            st.session_state.caen_channels[ch_num]['power_on'] = False
+                        st.session_state.device_enabled['pmt_hv'] = False
+                        st.session_state.pmt_power = [False, False, False]
+                except Exception as e:
+                    st.error(f"PMT HV control failed: {e}")
             st.rerun()
     
     with col2:
@@ -2349,24 +2383,67 @@ else:
     if st.session_state.mode == 'Run Sequence':
         count = st_autorefresh(interval=2000, key="run_monitor_refresh")
     
-    # Collect data when devices are enabled
-    if st.session_state.device_enabled.get('pmt_hv', False):
+    # Collect data when devices are enabled OR ramping down
+    # Continue monitoring even after turn-off to see ramp-down
+    collect_data = (
+        st.session_state.device_enabled.get('pmt_hv', False) or  # HV is on
+        len(st.session_state.caen_current_history['timestamps']) > 0  # Or we have history (ramping down)
+    )
+    
+    if collect_data:
         from datetime import datetime
         now = datetime.now()
         max_points = 100
         
-        # Collect CAEN current data
+        # Query actual device currents and voltages before collecting
+        if st.session_state.get('api_client'):
+            try:
+                for ch_num in range(1, 4):
+                    channel_status = st.session_state.api_client.caen_get_status(ch_num)
+                    st.session_state.caen_channels[ch_num]['current_mon'] = channel_status['current_mon']
+                    st.session_state.caen_channels[ch_num]['voltage_mon'] = channel_status['voltage_mon']
+                    st.session_state.caen_channels[ch_num]['power_on'] = channel_status['power_on']
+            except:
+                pass  # Use existing session state values if query fails
+        
+        # Collect CAEN current and voltage data
         for ch_num in range(1, 4):
-            if st.session_state.caen_channels[ch_num]['power_on']:
-                i_mon = st.session_state.caen_channels[ch_num]['current_mon']
-                st.session_state.caen_current_history[f'ch{ch_num}'].append(i_mon)
+            i_mon = st.session_state.caen_channels[ch_num]['current_mon']
+            v_mon = st.session_state.caen_channels[ch_num]['voltage_mon']
+            
+            st.session_state.caen_current_history[f'ch{ch_num}'].append(i_mon)
+            st.session_state.caen_voltage_history[f'ch{ch_num}'].append(v_mon)
         
         st.session_state.caen_current_history['timestamps'].append(now)
+        st.session_state.caen_voltage_history['timestamps'].append(now)
         
         # Trim to max points
         if len(st.session_state.caen_current_history['timestamps']) > max_points:
             for key in st.session_state.caen_current_history:
                 st.session_state.caen_current_history[key] = st.session_state.caen_current_history[key][-max_points:]
+            for key in st.session_state.caen_voltage_history:
+                st.session_state.caen_voltage_history[key] = st.session_state.caen_voltage_history[key][-max_points:]
+        
+        # Stop collecting if HV is off and voltages/currents are near zero
+        if not st.session_state.device_enabled.get('pmt_hv', False):
+            all_near_zero = True
+            for ch_num in range(1, 4):
+                v_mon = st.session_state.caen_channels[ch_num]['voltage_mon']
+                i_mon = st.session_state.caen_channels[ch_num]['current_mon']
+                if v_mon > 10 or i_mon > 1.0:  # Still ramping down
+                    all_near_zero = False
+                    break
+            
+            # Clear history if everything is at zero
+            if all_near_zero and len(st.session_state.caen_current_history['timestamps']) > 10:
+                st.session_state.caen_current_history = {
+                    'ch0': [], 'ch1': [], 'ch2': [], 'ch3': [],
+                    'timestamps': []
+                }
+                st.session_state.caen_voltage_history = {
+                    'ch0': [], 'ch1': [], 'ch2': [], 'ch3': [],
+                    'timestamps': []
+                }
     
     if st.session_state.device_enabled.get('sipm', False) and st.session_state.get('sipm_connected', False):
         from datetime import datetime
@@ -2403,6 +2480,23 @@ else:
                     'Current (µA)': st.session_state.caen_current_history[f'ch{idx}']
                 })
                 st.line_chart(i_df.set_index('Time'), height=150)
+    else:
+        st.info("Enable PMT HV to start monitoring")
+    
+    # Display CAEN HV voltage monitoring
+    st.markdown("**CAEN HV Voltage:**")
+    if len(st.session_state.caen_voltage_history['timestamps']) > 0:
+        
+        col1, col2, col3 = st.columns(3)
+        
+        for idx, col in enumerate([col1, col2, col3], start=1):
+            with col:
+                st.markdown(f"*Ch{idx}*")
+                v_df = pd.DataFrame({
+                    'Time': st.session_state.caen_voltage_history['timestamps'],
+                    'Voltage (V)': st.session_state.caen_voltage_history[f'ch{idx}']
+                })
+                st.line_chart(v_df.set_index('Time'), height=150)
     else:
         st.info("Enable PMT HV to start monitoring")
     
