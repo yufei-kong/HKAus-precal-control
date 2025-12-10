@@ -2261,12 +2261,12 @@ else:
     with col3:
         st.write(" ")  # Spacer
         if pmt1_serial and pmt2_serial:
-            st.info(f"📁 PMT1: `/data/runs/{pmt1_serial}/` | PMT2: `/data/runs/{pmt2_serial}/`")
+            st.info(f"📁 PMT1: `/home/hyperkaus/WaveDumpSaves/scan_<timestamp>/{pmt1_serial}/` | PMT2: `/home/hyperkaus/WaveDumpSaves/scan_<timestamp>/{pmt2_serial}/`")
         elif pmt1_serial or pmt2_serial:
             if pmt1_serial:
-                st.info(f"📁 PMT1: `/data/runs/{pmt1_serial}/` | ⚠️ PMT2: Not set")
+                st.info(f"📁 PMT1: `/home/hyperkaus/WaveDumpSaves/scan_<timestamp>/{pmt1_serial}/` | ⚠️ PMT2: Not set")
             else:
-                st.info(f"⚠️ PMT1: Not set | 📁 PMT2: `/data/runs/{pmt2_serial}/`")
+                st.info(f"⚠️ PMT1: Not set | 📁 PMT2: `/home/hyperkaus/WaveDumpSaves/scan_<timestamp>/{pmt2_serial}/`")
         else:
             st.warning("⚠️ Please enter PMT serial numbers before starting measurements")
     

@@ -182,7 +182,7 @@ class XArmPMTController:
         """
         Move through buffer positions for safe transitions.
         
-        Used when moving to/from high zenith angles (>= 40°) to avoid
+        Used when moving to/from high zenith angles (>= 35°) to avoid
         singularities and collisions.
         
         Args:
@@ -297,7 +297,7 @@ class XArmPMTController:
         if progress_callback:
             progress_callback(90, "Organizing files...")
         
-        save_dir = f"../WaveDumpSaves/dark_current_{timestamp}"
+        save_dir = f"/home/hyperkaus/WaveDumpSaves/dark_current_{timestamp}"
         self.digitizer.organize_files(
             save_dir=save_dir,
             prefix="dark_current",
@@ -427,7 +427,7 @@ class XArmPMTController:
                 self.digitizer.acquire(timeout=daq_runtime + 30)
                 
                 # Organize files
-                save_dir = f"../WaveDumpSaves/scan_{timestamp}/{serial}"
+                save_dir = f"/home/hyperkaus/WaveDumpSaves/scan_{timestamp}/{serial}"
                 self.digitizer.organize_files(
                     save_dir=save_dir,
                     prefix=f"theta{zenith}_phi{azimuth}",
