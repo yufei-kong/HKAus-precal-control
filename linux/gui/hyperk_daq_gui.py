@@ -490,8 +490,11 @@ if 'robot_controller' not in st.session_state:
             
             # Connect to xArm
             arm = XArmAPI('192.168.1.243')
-            arm.connect()
-            
+            # arm.connect()
+            arm.motion_enable(enable=True)
+            arm.set_mode(0) #0
+            arm.set_state(state=0)
+                        
             # Create robot controller
             robot_controller = XArmPMTController(arm=arm, digitizer=digitizer)
             st.session_state.robot_controller = robot_controller
@@ -1807,7 +1810,6 @@ if st.session_state.mode == "Setup & Monitor":
                         try:
                             st.session_state.robot_controller.move_to_pmt(1)
                             st.session_state.linear_stage_pos = 1074
-                            st.session_state.robot_position = 'pmt1'
                             st.success("✓ Moved to PMT1")
                         except Exception as e:
                             st.error(f"Failed to move to PMT1: {e}")
@@ -1820,7 +1822,6 @@ if st.session_state.mode == "Setup & Monitor":
                         try:
                             st.session_state.robot_controller.move_to_pmt(2)
                             st.session_state.linear_stage_pos = 240
-                            st.session_state.robot_position = 'pmt2'
                             st.success("✓ Moved to PMT2")
                         except Exception as e:
                             st.error(f"Failed to move to PMT2: {e}")
