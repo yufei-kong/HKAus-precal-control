@@ -258,10 +258,10 @@ class XArmPMTController:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         logger.info(f"Starting dark current check ({duration}s)")
         
-        # Move robot to safe position
-        if progress_callback:
-            progress_callback(10, "Moving to safe position...")
-        self.move_to_intermediate()
+        # # Move robot to safe position
+        # if progress_callback:
+        #     progress_callback(10, "Moving to safe position...")
+        # self.move_to_intermediate()
         
         # Configure DAQ for all PMT channels
         if progress_callback:
@@ -270,7 +270,10 @@ class XArmPMTController:
         channels = [2, 3, 4]  # PMT1, PMT2, PMT3 (monitor)
         self.digitizer.configure(
             run_duration=duration,
-            channels=channels
+            channels=channels,
+            trigger_channel=channels,
+            trigger_threshold=5,
+            channel_trigger_mode='ACQUISITION_ONLY'
         )
         
         # Acquire data

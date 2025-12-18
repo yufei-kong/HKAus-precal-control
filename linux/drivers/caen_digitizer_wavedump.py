@@ -20,6 +20,7 @@ from typing import Optional, List, Tuple, Dict
 from datetime import datetime
 from loguru import logger
 import sys
+from typing import Union
 
 
 class CAENDigitizerWaveDump:
@@ -162,7 +163,7 @@ class CAENDigitizerWaveDump:
         output_format: str = 'ASCII',  # 'ASCII' or 'BINARY'
         record_length: Optional[int] = None,
         post_trigger: Optional[int] = None,
-        trigger_channel: Optional[int] = None,
+        trigger_channel: Optional[Union[int, List[int]]] = None,
         trigger_threshold: Optional[int] = None,
         channel_trigger_mode: Optional[str] = None,
         other_params: Optional[Dict[str, any]] = None
@@ -185,6 +186,10 @@ class CAENDigitizerWaveDump:
         logger.info(f"  Duration: {run_duration}s")
         logger.info(f"  Channels: {channels}")
         
+        trigger_channels = []
+        if trigger_channel is not None:
+            trigger_channels = [trigger_channel] if isinstance(trigger_channel, int) else trigger_channel
+
         # Read template
         with open(self.config_template, 'r') as f:
             lines = f.readlines()
@@ -238,7 +243,7 @@ class CAENDigitizerWaveDump:
                         break
                 
                 # Set trigger threshold for specific channel if specified
-                if trigger_channel is not None and ch == trigger_channel and trigger_threshold is not None:
+                if trigger_channel is not None and ch in trigger_channels and trigger_threshold is not None:
                     for i in range(section_start, section_end):
                         if lines[i].strip().startswith("TRIGGER_THRESHOLD"):
                             lines[i] = f"TRIGGER_THRESHOLD      {trigger_threshold}\n"
@@ -246,7 +251,7 @@ class CAENDigitizerWaveDump:
                             break
                 
                 # Set channel trigger mode for specific channel if specified
-                if trigger_channel is not None and ch == trigger_channel and channel_trigger_mode is not None:
+                if trigger_channel is not None and ch in trigger_channels and channel_trigger_mode is not None:
                     for i in range(section_start, section_end):
                         if lines[i].strip().startswith("CHANNEL_TRIGGER"):
                             lines[i] = f"CHANNEL_TRIGGER        {channel_trigger_mode}\n"
