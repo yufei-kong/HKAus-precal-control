@@ -11,6 +11,7 @@ Usage:
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import time
+import threading
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
@@ -19,6 +20,15 @@ import sys
 import os
 from pathlib import Path
 import atexit
+from loguru import logger
+import warnings
+
+# Import shared state module (persists across Streamlit reruns)
+import shared_state
+
+# Suppress annoying ScriptRunContext warnings from threading
+warnings.filterwarnings('ignore', message='.*ScriptRunContext.*')
+warnings.filterwarnings('ignore', category=UserWarning, module='streamlit')
 
 # Add paths
 script_dir = Path(__file__).parent  # gui/
@@ -32,6 +42,20 @@ xarm_sdk_path = linux_dir / "xArm-Python-SDK"
 sys.path.insert(0, str(xarm_sdk_path))
 
 # Library imports
+try:
+    from drivers.xarm_pmt_controller import XArmPMTController
+    XARM_CONTROLLER_AVAILABLE = True
+except ImportError as e:
+    XARM_CONTROLLER_AVAILABLE = False
+    print(f"⚠ xArm PMT Controller not available: {e}")
+
+try:
+    from drivers.system_coordinator import HyperKSystemCoordinator
+    SYSTEM_COORDINATOR_AVAILABLE = True
+except ImportError as e:
+    SYSTEM_COORDINATOR_AVAILABLE = False
+    print(f"⚠ System Coordinator not available: {e}")
+
 try:
     from drivers.caen_digitizer_wavedump import CAENDigitizerWaveDump
     DIGITIZER_AVAILABLE = True
@@ -51,13 +75,139 @@ try:
     API_CLIENT_AVAILABLE = True
 except ImportError as e:
     API_CLIENT_AVAILABLE = False
-    print(f"⚠  Windows API client not available: {e}")
+    print(f"⚠ Windows API client not available: {e}")
 
 # ============================================================================
 # MODULE-LEVEL GLOBALS (for cleanup without Streamlit context)
 # ============================================================================
 _sipm_supply = None
 _digitizer = None
+_system_coordinator = None
+_robot_controller = None
+
+# Use shared_state module for persistent data across reruns
+# This module is imported once and cached by Python
+
+# ============================================================================
+# THREADING HELPER FUNCTIONS FOR RUN SEQUENCES
+# ============================================================================
+
+def progress_callback(progress_pct, message, position=""):
+    """
+    Progress callback function called by robot controller during scan.
+    Updates shared progress dictionary (thread-safe).
+    
+    Args:
+        progress_pct: Progress percentage (0-100)
+        message: Status message describing current action
+        position: Current position string (e.g., "θ=30°, φ=90°"), optional
+    """
+    # Access the global persistent dict
+    shared_state.progress_data['progress_pct'] = int(progress_pct)
+    shared_state.progress_data['status_text'] = message
+    shared_state.progress_data['position'] = position
+    
+    # Print with or without position
+    if position:
+        print(f"[PROGRESS] {progress_pct}% - {message} @ {position}")
+    else:
+        print(f"[PROGRESS] {progress_pct}% - {message}")
+
+def run_sequence_worker(coordinator, sequence_type, params):
+    """
+    Worker function that runs in background thread.
+    Executes the run sequence and updates session state when complete.
+    
+    Args:
+        coordinator: SystemCoordinator instance
+        sequence_type: Type of sequence ("Dark Current", "Single PMT", etc.)
+        params: Dictionary of parameters for the sequence
+    """
+    # Suppress ScriptRunContext warnings from thread
+    import warnings
+    warnings.filterwarnings('ignore', message='.*ScriptRunContext.*')
+    
+    try:
+        print(f"[THREAD] Starting {sequence_type} sequence")
+        
+        # Mark as active in global dict
+        shared_state.progress_data['active'] = True
+        
+        if "Dark Current" in sequence_type:
+            result = coordinator.run_dark_current_check(
+                pmt1_serial=params['pmt1_serial'],
+                pmt2_serial=params['pmt2_serial'],
+                duration=params['duration'],
+                progress_callback=progress_callback
+            )
+            
+        elif "Single PMT" in sequence_type:
+            result = coordinator.run_single_pmt_scan(
+                pmt_number=params['pmt_num'],
+                serial=params['serial'],
+                zeniths=params['zeniths'],
+                azimuths=params['azimuths'],
+                daq_runtime=params['daq_runtime'],
+                progress_callback=progress_callback
+            )
+            
+        elif "Full PMT Scan" in sequence_type:
+            result = coordinator.run_full_scan(
+                pmt1_serial=params['pmt1_serial'],
+                pmt2_serial=params['pmt2_serial'],
+                zeniths=params['zeniths'],
+                azimuths=params['azimuths'],
+                daq_runtime=params['daq_runtime'],
+                progress_callback=progress_callback
+            )
+        else:
+            result = {'status': 'error', 'error': f'Unknown sequence type: {sequence_type}'}
+        
+        # Store result in global dict
+        shared_state.progress_data['result'] = result
+        shared_state.progress_data['active'] = False
+        
+        print(f"[THREAD] {sequence_type} completed: {result.get('status')}")
+        
+    except Exception as e:
+        print(f"[THREAD] ERROR: {e}")
+        shared_state.progress_data['result'] = {'status': 'error', 'error': str(e)}
+        shared_state.progress_data['active'] = False
+
+# Logger
+def setup_logging():
+    """Setup loguru logging to both console and file"""
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"hyperk_daq_{timestamp}.log"
+    
+    # Remove default handler (to avoid duplicates on reruns)
+    logger.remove()
+    
+    # Add console handler (like before)
+    logger.add(
+        sys.stderr,
+        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <5}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        level="DEBUG"
+    )
+    
+    # Add file handler
+    logger.add(
+        str(log_file),
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <5} | {name}:{function}:{line} - {message}",
+        level="DEBUG",
+        rotation="500 MB",  # Rotate if file gets too big
+        retention="30 days"  # Keep logs for 30 days
+    )
+    
+    logger.info(f"Logging to file: {log_file}")
+    return log_file
+
+# Call once at startup
+if 'log_file' not in st.session_state:
+    st.session_state.log_file = setup_logging()
 
 # Page config
 st.set_page_config(
@@ -327,43 +477,7 @@ def get_sequence_list():
     else:
         return default_sequences + ["Create New Custom Scan..."]
 
-# # Initialize hardware (add this section)
-# if 'system' not in st.session_state and not st.session_state.get('mock_mode', False):
-#     try:
-#         # Import required modules
-#         from xarm.wrapper import XArmAPI
-#         from drivers.xarm_pmt_controller import XArmPMTController
-#         from drivers.caen_digitizer_wavedump import CAENDigitizerWaveDump
-#         from drivers.system_coordinator import HyperKSystemCoordinator
-#         from api_client.device_api_client import WindowsDeviceClient
-        
-#         # Connect to robot
-#         arm = XArmAPI('192.168.1.xxx')  # ← YOUR ROBOT IP HERE
-#         arm.connect()
-        
-#         # Initialize digitizer
-#         digitizer = CAENDigitizerWaveDump(
-#             wavedump_path="/usr/local/bin/WaveDump",
-#             config_template="configs/WaveDumpConfig_template.txt"
-#         )
-        
-#         # Initialize robot controller
-#         robot = XArmPMTController(arm=arm, digitizer=digitizer)
-        
-#         # Initialize API client for Windows devices
-#         api_client = WindowsDeviceClient("192.168.0.186")  # ← YOUR WINDOWS IP HERE
-        
-#         # Create system coordinator
-#         st.session_state.system = HyperKSystemCoordinator(
-#             robot_controller=robot,
-#             api_client=api_client
-#         )
-        
-#         st.success("✓ All systems initialized")
-        
-#     except Exception as e:
-#         st.error(f"Initialization failed: {e}")
-#         st.session_state.system = None
+# # Initialize hardware
 
 # Initialize digitizer
 if 'digitizer' not in st.session_state:
@@ -465,6 +579,45 @@ if 'api_client' not in st.session_state:
         st.session_state.api_client = None
         st.session_state.api_connected = False
 
+# Initialize Robot Controller and System Coordinator
+if 'robot_controller' not in st.session_state:
+    if XARM_CONTROLLER_AVAILABLE and SYSTEM_COORDINATOR_AVAILABLE:
+        try:
+            # Import xArm SDK
+            from xarm.wrapper import XArmAPI
+            
+            # Connect to xArm
+            arm = XArmAPI('192.168.1.243')
+            # arm.connect()
+            arm.motion_enable(enable=True)
+            arm.set_mode(0) #0
+            arm.set_state(state=0)
+                        
+            # Create robot controller
+            robot_controller = XArmPMTController(arm=arm, digitizer=digitizer)
+            st.session_state.robot_controller = robot_controller
+            
+            # Create system coordinator (combines robot + Windows API)
+            system_coordinator = HyperKSystemCoordinator(
+                robot_controller=robot_controller,
+                api_client=st.session_state.api_client if 'api_client' in st.session_state else None
+            )
+            st.session_state.system_coordinator = system_coordinator
+            
+            # Store in module-level variables for cleanup (already at module scope, no global needed)
+            _robot_controller = robot_controller
+            _system_coordinator = system_coordinator
+            
+            print("✓ Robot controller and system coordinator initialized")
+            
+        except Exception as e:
+            st.session_state.robot_controller = None
+            st.session_state.system_coordinator = None
+            print(f"Robot controller initialization failed: {e}")
+    else:
+        st.session_state.robot_controller = None
+        st.session_state.system_coordinator = None
+
 # Initialize CAEN HV session state
 if 'caen_channels' not in st.session_state:
     st.session_state.caen_channels = {}
@@ -512,6 +665,16 @@ if 'run_active' not in st.session_state:
     st.session_state.run_active = False
 if 'run_progress' not in st.session_state:
     st.session_state.run_progress = 0
+if 'run_thread' not in st.session_state:
+    st.session_state.run_thread = None
+if 'run_result' not in st.session_state:
+    st.session_state.run_result = None
+if 'run_position' not in st.session_state:
+    st.session_state.run_position = ""
+if 'run_status_text' not in st.session_state:
+    st.session_state.run_status_text = ""
+if 'stop_requested' not in st.session_state:
+    st.session_state.stop_requested = False
 if 'pmt_voltages' not in st.session_state:
     st.session_state.pmt_voltages = [1000, 1100, 950]
 if 'pmt_power' not in st.session_state:
@@ -527,9 +690,11 @@ if 'laser_tec_on' not in st.session_state:
 if 'robot_position' not in st.session_state:
     st.session_state.robot_position = 'home'
 if 'linear_stage_pos' not in st.session_state:
-    st.session_state.linear_stage_pos = 657  # Middle position
-if 'robot_coords' not in st.session_state:
-    st.session_state.robot_coords = {'x': 200, 'y': 0, 'z': 300, 'roll': 0, 'pitch': 0, 'yaw': 0}
+    st.session_state.linear_stage_pos = 1074 #PMT 1 position
+if 'system_coordinator' not in st.session_state:
+    st.session_state.system_coordinator = None
+if 'robot_controller' not in st.session_state:
+    st.session_state.robot_controller = None
 if 'device_enabled' not in st.session_state:
     st.session_state.device_enabled = {
         'pmt_hv': False,
@@ -538,6 +703,38 @@ if 'device_enabled' not in st.session_state:
         'laser': False,
         'robot': False
     }
+
+# Sync device states from actual hardware on first load (AFTER device_enabled exists)
+if 'device_states_synced' not in st.session_state:
+    st.session_state.device_states_synced = False
+    
+    # Sync signal generator state from device
+    if st.session_state.get('api_client'):
+        try:
+            status = st.session_state.api_client.siggen_get_status(1)
+            st.session_state.device_enabled['siggen'] = status.get('output_enabled', False)
+            print(f"Synced siggen state: {st.session_state.device_enabled['siggen']}")
+        except Exception as e:
+            print(f"Failed to sync siggen state: {e}")
+            st.session_state.device_enabled['siggen'] = False
+        
+        # Sync PMT HV state from device
+        try:
+            # Check if any PMT channel is on
+            any_on = False
+            for ch in range(1, 4):
+                status = st.session_state.api_client.caen_get_status(ch)
+                if status.get('power_on', False):
+                    any_on = True
+                    break
+            st.session_state.device_enabled['pmt_hv'] = any_on
+            print(f"Synced PMT HV state: {st.session_state.device_enabled['pmt_hv']}")
+        except Exception as e:
+            print(f"Failed to sync PMT HV state: {e}")
+            st.session_state.device_enabled['pmt_hv'] = False
+    
+    st.session_state.device_states_synced = True
+
 if 'emergency_stop_confirm' not in st.session_state:
     st.session_state.emergency_stop_confirm = False
 if 'custom_sequences' not in st.session_state:
@@ -546,47 +743,54 @@ if 'pmt_serial_number' not in st.session_state:
     st.session_state.pmt_serial_number = {"pmt1": "", "pmt2": ""}
 if 'laser_trigger_mode' not in st.session_state:
     st.session_state.laser_trigger_mode = "EXT"
-if 'selected_sequence' not in st.session_state:
-    st.session_state.selected_sequence = "Dark Current Check (5 min)"
 
 if 'cleanup_registered' not in st.session_state:
     
     def cleanup_devices():
-        """Cleanup devices on exit"""
-        global _sipm_supply, _digitizer
+        """Cleanup software resources on exit - does NOT shut down hardware"""
+        global _sipm_supply, _digitizer, _system_coordinator, _robot_controller
         
         print("\n" + "="*60)
-        print("SHUTTING DOWN - Cleaning up devices...")
+        print("GUI CLOSING - Cleaning up software resources...")
         print("="*60)
         
         cleaned = []
         
+        # Only close connections - do NOT turn off hardware
+        # Hardware should remain in its current state
+        
         if _sipm_supply is not None:
             try:
-                _sipm_supply.OFF()
-                _sipm_supply.close()
-                cleaned.append("✓ SiPM supply: Output OFF, connection closed")
+                _sipm_supply.close()  # Close connection only, do NOT turn OFF
+                cleaned.append("✓ SiPM supply: Connection closed (output state unchanged)")
             except Exception as e:
                 cleaned.append(f"⚠ SiPM: {e}")
         
         if _digitizer is not None:
             try:
                 _digitizer.cleanup_temp_files()
-                cleaned.append("✓ Digitizer: Cleaned")
+                cleaned.append("✓ Digitizer: Temp files cleaned")
             except Exception as e:
                 cleaned.append(f"⚠ Digitizer: {e}")
+
+        if _robot_controller is not None:
+            try:
+                _robot_controller.arm.disconnect()
+                cleaned.append("✓ xArm: Connection closed (position unchanged)")
+            except Exception as e:
+                cleaned.append(f"⚠ xArm: {e}")
         
+        # Note: Robot, HV, laser, etc. remain in current state
+        # Use Emergency Stop button if you need to shut down hardware
         
-        # if _api_client is not None:
-        #     try:
-        #         # Optionally send shutdown commands to Windows devices
-        #         # _api_client.caen_emergency_off()
-        #         cleaned.append("✓ API client: Disconnected")
-        #     except Exception as e:
-        #         cleaned.append(f"⚠  API: {e}")
         if cleaned:
             for msg in cleaned:
                 print(f"  {msg}")
+        
+        print("="*60)
+        print("Cleanup complete. Hardware remains in current state.")
+        print("Use Emergency Stop button if hardware shutdown needed.")
+        print("="*60 + "\n")
         
         print("="*60)
         print("Cleanup complete. Safe to exit.")
@@ -670,7 +874,7 @@ with st.sidebar:
 
     st.markdown(f"{status_dot(sipm_status)} SiPM Supply", unsafe_allow_html=True)
     
-    # Signal Gen
+    # Signal Gen - use session state (synced on changes)
     siggen_status = 'green' if st.session_state.device_enabled['siggen'] else 'red'
     st.markdown(f"{status_dot(siggen_status)} Signal Generator", unsafe_allow_html=True)
     
@@ -715,7 +919,20 @@ with st.sidebar:
         col1, col2 = st.columns(2)
         with col1:
             if st.button("✓ YES", key='emergency_yes'):
-                # Execute emergency stop
+                # Execute emergency stop using system coordinator
+                if st.session_state.system_coordinator is not None:
+                    try:
+                        result = st.session_state.system_coordinator.emergency_shutdown_all(
+                            reason="Emergency stop button pressed in GUI"
+                        )
+                        if result['overall_success']:
+                            st.error("🚨 EMERGENCY STOP ACTIVATED - All systems shut down")
+                        else:
+                            st.error(f"⚠️ Emergency stop completed with errors: {result}")
+                    except Exception as e:
+                        st.error(f"Emergency stop failed: {e}")
+                
+                # Also update GUI state
                 st.session_state.pmt_power = [False, False, False]
                 st.session_state.pmt_ramping = [False, False, False]
                 st.session_state.laser_ld_on = False
@@ -723,7 +940,6 @@ with st.sidebar:
                 st.session_state.run_active = False
                 st.session_state.device_enabled = {k: False for k in st.session_state.device_enabled}
                 st.session_state.emergency_stop_confirm = False
-                st.error("EMERGENCY STOP ACTIVATED!")
                 time.sleep(1)
                 st.rerun()
         with col2:
@@ -1271,6 +1487,8 @@ if st.session_state.mode == "Setup & Monitor":
         else:
             try:
                 channel = 1  # We typically use channel 1
+                
+                # Refresh status after any changes
                 status = st.session_state.api_client.siggen_get_status(channel)
                 
                 col1, col2 = st.columns([2, 1])
@@ -1278,10 +1496,18 @@ if st.session_state.mode == "Setup & Monitor":
                 with col1:
                     st.markdown("**Waveform Configuration:**")
                     
+                    # Map device waveform to selectbox index
+                    waveform_options = ["SINE", "SQUARE", "PULSE", "RAMP", "NOISE"]
+                    current_waveform = status.get('waveform', 'PULSE')
+                    try:
+                        waveform_index = waveform_options.index(current_waveform)
+                    except ValueError:
+                        waveform_index = 2  # Default to PULSE if unknown
+                    
                     waveform = st.selectbox(
                         "Waveform:",
-                        ["SINE", "SQUARE", "PULSE", "RAMP", "NOISE"],
-                        index=2,  # Default to PULSE
+                        waveform_options,
+                        index=waveform_index,  # Use actual device value
                         key="siggen_wave_type"
                     )
                     
@@ -1289,7 +1515,7 @@ if st.session_state.mode == "Setup & Monitor":
                         "Frequency (Hz)",
                         min_value=1.0,
                         max_value=30000000.0,
-                        value=1000.0,
+                        value=float(status.get('frequency', 1000.0)),  # Use actual device value
                         format="%.1f",
                         key="siggen_freq"
                     )
@@ -1298,7 +1524,7 @@ if st.session_state.mode == "Setup & Monitor":
                         "Amplitude (V)",
                         min_value=0.0,
                         max_value=10.0,
-                        value=3.3,
+                        value=float(status.get('amplitude', 5.5)),  # Use actual device value
                         step=0.1,
                         key="siggen_amp"
                     )
@@ -1307,7 +1533,7 @@ if st.session_state.mode == "Setup & Monitor":
                         "Offset (V)",
                         min_value=-5.0,
                         max_value=5.0,
-                        value=0.0,
+                        value=float(status.get('offset', 2.0)),  # Use actual device value
                         step=0.1,
                         key="siggen_offset"
                     )
@@ -1317,7 +1543,7 @@ if st.session_state.mode == "Setup & Monitor":
                             "Pulse Width (ns)",
                             min_value=8.0,
                             max_value=1000000.0,
-                            value=100.0,
+                            value=32.6,
                             step=1.0,
                             key="siggen_pulse_width"
                         )
@@ -1333,7 +1559,7 @@ if st.session_state.mode == "Setup & Monitor":
                     st.markdown("**Status:**")
                     st.write(" ")
                     
-                    # Output status indicator
+                    # Get fresh output status from API
                     output_on = status.get('output_enabled', False)
                     if output_on:
                         st.markdown(f"{status_dot('green')} Output ON", unsafe_allow_html=True)
@@ -1354,9 +1580,9 @@ if st.session_state.mode == "Setup & Monitor":
                         ):
                             try:
                                 st.session_state.api_client.siggen_enable_output(channel, True)
-                                st.session_state.device_enabled['siggen'] = True
+                                st.session_state.device_enabled['siggen'] = True  # Sync session state
+                                time.sleep(1.0)  # Wait for device to update
                                 st.success("✓ Output enabled")
-                                time.sleep(0.5)
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Failed to enable: {e}")
@@ -1370,9 +1596,9 @@ if st.session_state.mode == "Setup & Monitor":
                         ):
                             try:
                                 st.session_state.api_client.siggen_enable_output(channel, False)
-                                st.session_state.device_enabled['siggen'] = False
+                                st.session_state.device_enabled['siggen'] = False  # Sync session state
+                                time.sleep(1.0)  # Wait for device to update
                                 st.info("✓ Output disabled")
-                                time.sleep(0.5)
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Failed to disable: {e}")
@@ -1464,7 +1690,7 @@ if st.session_state.mode == "Setup & Monitor":
                         )
                     with col_t2:
                         st.metric("Board Temp", f"{board_temp:.2f} °C")
-                        if board_temp > 35:
+                        if board_temp > 42:
                             st.caption("⚠️ High")
                         elif board_temp > 30:
                             st.caption("Normal")
@@ -1662,6 +1888,14 @@ if st.session_state.mode == "Setup & Monitor":
     with tabs[4]:
         st.subheader("xArm + Linear Stage Control")
         
+        # Controller Status
+        if st.session_state.robot_controller is not None:
+            st.success("✅ Robot controller connected")
+        else:
+            st.error("❌ Robot controller not connected - check startup logs")
+        
+        st.markdown("---")
+        
         col1, col2 = st.columns([1, 1])
         
         with col1:
@@ -1680,15 +1914,27 @@ if st.session_state.mode == "Setup & Monitor":
             col_a, col_b = st.columns(2)
             with col_a:
                 if st.button("📍 PMT1 (1074mm)", key="stage_pmt1", use_container_width=True):
-                    st.session_state.linear_stage_pos = 1074
-                    st.session_state.robot_position = 'pmt1'
-                    st.info("Moving to PMT1...")
+                    if st.session_state.robot_controller is not None:
+                        try:
+                            st.session_state.robot_controller.move_to_pmt(1)
+                            st.session_state.linear_stage_pos = 1074
+                            st.success("✓ Moved to PMT1")
+                        except Exception as e:
+                            st.error(f"Failed to move to PMT1: {e}")
+                    else:
+                        st.warning("⚠️ Robot controller not initialized")
                     st.rerun()
             with col_b:
                 if st.button("📍 PMT2 (240mm)", key="stage_pmt2", use_container_width=True):
-                    st.session_state.linear_stage_pos = 240
-                    st.session_state.robot_position = 'pmt2'
-                    st.info("Moving to PMT2...")
+                    if st.session_state.robot_controller is not None:
+                        try:
+                            st.session_state.robot_controller.move_to_pmt(2)
+                            st.session_state.linear_stage_pos = 240
+                            st.success("✓ Moved to PMT2")
+                        except Exception as e:
+                            st.error(f"Failed to move to PMT2: {e}")
+                    else:
+                        st.warning("⚠️ Robot controller not initialized")
                     st.rerun()
             
             # Manual position slider
@@ -1698,45 +1944,141 @@ if st.session_state.mode == "Setup & Monitor":
                                value=st.session_state.linear_stage_pos,
                                key="stage_manual")
             if st.button("Move to Position", key="stage_move"):
-                st.session_state.linear_stage_pos = new_pos
-                st.info(f"Moving to {new_pos} mm...")
+                if st.session_state.robot_controller is not None:
+                    try:
+                        st.session_state.robot_controller.move_linear_stage(new_pos)
+                        st.session_state.linear_stage_pos = new_pos
+                        st.success(f"✓ Moved to {new_pos} mm")
+                    except Exception as e:
+                        st.error(f"Failed to move stage: {e}")
+                else:
+                    st.warning("⚠️ Robot controller not initialized")
                 st.rerun()
         
         with col2:
             st.markdown("**xArm Robot:**")
             
             # Display current position
-            coords = st.session_state.robot_coords
-            st.markdown(f"""
-            **Current Position:**
-            - X: {coords['x']} mm
-            - Y: {coords['y']} mm  
-            - Z: {coords['z']} mm
-            - Roll: {coords['roll']}°
-            - Pitch: {coords['pitch']}°
-            - Yaw: {coords['yaw']}°
-            """)
+            current_pos = st.session_state.robot_position
             
-            # Quick positions
-            st.markdown("**Quick Positions:**")
+            # Position sequence: home -> intermediate -> pmt_top
+            position_info = {
+                'home': {'name': 'Initial (Home)', 'icon': '🏠', 'next': 'intermediate', 'prev': None},
+                'intermediate': {'name': 'Intermediate', 'icon': '🔄', 'next': 'pmt_top', 'prev': 'home'},
+                'pmt_top': {'name': 'PMT Top', 'icon': '🔝', 'next': None, 'prev': 'intermediate'}
+            }
             
-            if st.button("🏠 Initial (Home)", key="robot_home", use_container_width=True):
-                st.session_state.robot_position = 'home'
-                st.session_state.robot_coords = {'x': 200, 'y': 0, 'z': 300, 'roll': 0, 'pitch': 0, 'yaw': 0}
-                st.info("Moving to Home...")
+            # Joint angles from xarm_pmt_controller.py
+            ROBOT_JOINT_ANGLES = {
+                'home': [0, 0, 0, 0, 0, -135],              # HOME_TRUE (vertical)
+                'intermediate': [0, -116.5, 5, 0, 0, -135], # HOME (safe intermediate)
+                'pmt_top': [-0.0, -116.812436, -25.177883, 0.0, 51.990269, -135.0]  # PMT_TOP
+            }
+            
+            # Show current position prominently
+            if current_pos in position_info:
+                st.markdown(f"### {position_info[current_pos]['icon']} {position_info[current_pos]['name']}")
+            else:
+                st.markdown(f"### ❓ Unknown Position")
+            
+            # Show joint angles for current position
+            if current_pos in ROBOT_JOINT_ANGLES:
+                angles = ROBOT_JOINT_ANGLES[current_pos]
+                st.caption(f"Joint angles: [{angles[0]:.1f}, {angles[1]:.1f}, {angles[2]:.1f}, {angles[3]:.1f}, {angles[4]:.1f}, {angles[5]:.1f}]")
+            
+            st.markdown("---")
+            st.markdown("**Sequential Position Control:**")
+            st.caption("⚠️ Must move through positions in order for safety")
+            
+            # Position buttons with sequential logic
+            col_a, col_b = st.columns(2)
+            
+            with col_a:
+                # Home button - always accessible
+                if st.button(
+                    "🏠 Initial",
+                    key="robot_home",
+                    use_container_width=True,
+                    disabled=(current_pos == 'home')
+                ):
+                    if st.session_state.robot_controller is not None:
+                        try:
+                            st.session_state.robot_controller.move_to_initial()
+                            st.session_state.robot_position = 'home'
+                            st.success("✓ Moved to Initial position")
+                        except Exception as e:
+                            st.error(f"Failed to move to Initial: {e}")
+                    else:
+                        st.warning("⚠️ Robot controller not initialized")
+                    st.rerun()
+                
+                if current_pos == 'home':
+                    st.caption("✓ At Home")
+                else:
+                    st.caption("⚠️ Return here first")
+            
+            with col_b:
+                # Intermediate button - only from home or pmt_top
+                can_intermediate = current_pos in ['home', 'pmt_top']
+                
+                if st.button(
+                    "🔄 Intermediate",
+                    key="robot_inter",
+                    use_container_width=True,
+                    disabled=(current_pos == 'intermediate' or not can_intermediate)
+                ):
+                    if st.session_state.robot_controller is not None:
+                        try:
+                            st.session_state.robot_controller.move_to_intermediate()
+                            st.session_state.robot_position = 'intermediate'
+                            st.success("✓ Moved to Intermediate position")
+                        except Exception as e:
+                            st.error(f"Failed to move to Intermediate: {e}")
+                    else:
+                        st.warning("⚠️ Robot controller not initialized")
+                    st.rerun()
+                
+                if current_pos == 'intermediate':
+                    st.caption("✓ At Intermediate")
+                elif can_intermediate:
+                    st.caption("→ Next position")
+                else:
+                    st.caption("⊗ Not accessible")
+            
+            # PMT Top button - only from intermediate
+            can_pmt_top = (current_pos == 'intermediate')
+            
+            if st.button(
+                "🔝 PMT Top",
+                key="robot_top",
+                use_container_width=True,
+                disabled=(current_pos == 'pmt_top' or not can_pmt_top)
+            ):
+                if st.session_state.robot_controller is not None:
+                    try:
+                        st.session_state.robot_controller.move_to_pmt_top()
+                        st.session_state.robot_position = 'pmt_top'
+                        st.success("✓ Moved to PMT Top position")
+                    except Exception as e:
+                        st.error(f"Failed to move to PMT Top: {e}")
+                else:
+                    st.warning("⚠️ Robot controller not initialized")
                 st.rerun()
             
-            if st.button("🔄 Intermediate", key="robot_inter", use_container_width=True):
-                st.session_state.robot_position = 'intermediate'
-                st.session_state.robot_coords = {'x': 150, 'y': 100, 'z': 400, 'roll': 0, 'pitch': 45, 'yaw': 0}
-                st.info("Moving to Intermediate...")
-                st.rerun()
+            if current_pos == 'pmt_top':
+                st.caption("✓ At PMT Top")
+            elif can_pmt_top:
+                st.caption("→ Final position")
+            else:
+                st.caption("⊗ Must be at Intermediate first")
             
-            if st.button("🔝 PMT Top", key="robot_top", use_container_width=True):
-                st.session_state.robot_position = 'pmt_top'
-                st.session_state.robot_coords = {'x': 100, 'y': 150, 'z': 500, 'roll': 0, 'pitch': 90, 'yaw': 0}
-                st.info("Moving to PMT Top...")
-                st.rerun()
+            st.markdown("---")
+            
+            # Position sequence diagram
+            st.markdown("**Position Sequence:**")
+            st.code("Home → Intermediate → PMT Top → Intermediate → Home", language="text")
+            
+            st.info("ℹ️ Robot uses safe joint angles (not Cartesian coordinates)")
         
         st.markdown("---")
         
@@ -1893,7 +2235,7 @@ if st.session_state.mode == "Setup & Monitor":
                                 
                                 if success:
                                     # Check what files were created (before organizing)
-                                    waveform_files = st.session_state.digitizer.get_all_waveforms(channels)
+                                    waveform_files = st.session_state.digitizer.get_all_wavefiles(channels)
                                     num_files = len(waveform_files)
                                     
                                     # Organize files
@@ -2004,6 +2346,23 @@ else:
     
     st.title("Run Sequence Mode")
     st.caption("Automated measurement sequences with coordinated device control")
+
+    # Auto-refresh when run is active to update progress display
+    if st.session_state.run_active:
+        count = st_autorefresh(interval=2000, key="run_sequence_autorefresh")
+    
+    # Sync progress data from thread-safe dictionary to session state
+    # (Background thread updates shared_state.progress_data, we copy to session_state on each rerun)
+    if shared_state.progress_data['active'] or shared_state.progress_data['progress_pct'] > 0:
+        st.session_state.run_progress = shared_state.progress_data['progress_pct']
+        st.session_state.run_status_text = shared_state.progress_data['status_text']
+        st.session_state.run_position = shared_state.progress_data['position']
+    
+    # Check if thread completed
+    if shared_state.progress_data['result'] is not None and st.session_state.run_active:
+        st.session_state.run_result = shared_state.progress_data['result']
+        st.session_state.run_active = False
+        shared_state.progress_data['active'] = False
     
     # PMT Serial Number Input - Two PMTs
     st.subheader("PMT Configuration")
@@ -2012,7 +2371,7 @@ else:
     with col1:
         pmt1_serial = st.text_input("PMT1 Serial Number:", 
                                    value=st.session_state.pmt_serial_number["pmt1"],
-                                   placeholder="e.g., ZE1234",
+                                   placeholder="e.g., EL5150-B",
                                    key="pmt1_serial_input",
                                    help="Serial number for PMT at position 1")
         st.session_state.pmt_serial_number["pmt1"] = pmt1_serial
@@ -2020,7 +2379,7 @@ else:
     with col2:
         pmt2_serial = st.text_input("PMT2 Serial Number:", 
                                    value=st.session_state.pmt_serial_number["pmt2"],
-                                   placeholder="e.g., ZE5678",
+                                   placeholder="e.g., EL7370-A",
                                    key="pmt2_serial_input",
                                    help="Serial number for PMT at position 2")
         st.session_state.pmt_serial_number["pmt2"] = pmt2_serial
@@ -2028,12 +2387,12 @@ else:
     with col3:
         st.write(" ")  # Spacer
         if pmt1_serial and pmt2_serial:
-            st.info(f"📁 PMT1: `/data/runs/{pmt1_serial}/` | PMT2: `/data/runs/{pmt2_serial}/`")
+            st.info(f"📁 PMT1: `/home/hyperkaus/WaveDumpSaves/scan_<timestamp>/{pmt1_serial}/` | PMT2: `/home/hyperkaus/WaveDumpSaves/scan_<timestamp>/{pmt2_serial}/`")
         elif pmt1_serial or pmt2_serial:
             if pmt1_serial:
-                st.info(f"📁 PMT1: `/data/runs/{pmt1_serial}/` | ⚠️ PMT2: Not set")
+                st.info(f"📁 PMT1: `/home/hyperkaus/WaveDumpSaves/scan_<timestamp>/{pmt1_serial}/` | ⚠️ PMT2: Not set")
             else:
-                st.info(f"⚠️ PMT1: Not set | 📁 PMT2: `/data/runs/{pmt2_serial}/`")
+                st.info(f"⚠️ PMT1: Not set | 📁 PMT2: `/home/hyperkaus/WaveDumpSaves/scan_<timestamp>/{pmt2_serial}/`")
         else:
             st.warning("⚠️ Please enter PMT serial numbers before starting measurements")
     
@@ -2050,11 +2409,30 @@ else:
             use_container_width=True,
             key='toggle_pmt'
         ):
-            st.session_state.device_enabled['pmt_hv'] = not st.session_state.device_enabled['pmt_hv']
-            if st.session_state.device_enabled['pmt_hv']:
-                st.session_state.pmt_power = [True, True, True]
-            else:
-                st.session_state.pmt_power = [False, False, False]
+            if st.session_state.get('api_client'):
+                try:
+                    # Toggle all PMT channels
+                    new_state = not st.session_state.device_enabled['pmt_hv']
+                    
+                    if new_state:
+                        # Turn ON all PMT channels
+                        for ch_num in range(1, 4):
+                            v_set = st.session_state.pmt_voltages[ch_num-1]
+                            st.session_state.api_client.caen_set_voltage(ch_num, v_set)
+                            st.session_state.api_client.caen_set_power(ch_num, True)
+                            st.session_state.caen_channels[ch_num]['power_on'] = True
+                            st.session_state.caen_channels[ch_num]['v_set'] = v_set
+                        st.session_state.device_enabled['pmt_hv'] = True
+                        st.session_state.pmt_power = [True, True, True]
+                    else:
+                        # Turn OFF all PMT channels
+                        for ch_num in range(1, 4):
+                            st.session_state.api_client.caen_set_power(ch_num, False)
+                            st.session_state.caen_channels[ch_num]['power_on'] = False
+                        st.session_state.device_enabled['pmt_hv'] = False
+                        st.session_state.pmt_power = [False, False, False]
+                except Exception as e:
+                    st.error(f"PMT HV control failed: {e}")
             st.rerun()
     
     with col2:
@@ -2131,24 +2509,67 @@ else:
     if st.session_state.mode == 'Run Sequence':
         count = st_autorefresh(interval=2000, key="run_monitor_refresh")
     
-    # Collect data when devices are enabled
-    if st.session_state.device_enabled.get('pmt_hv', False):
+    # Collect data when devices are enabled OR ramping down
+    # Continue monitoring even after turn-off to see ramp-down
+    collect_data = (
+        st.session_state.device_enabled.get('pmt_hv', False) or  # HV is on
+        len(st.session_state.caen_current_history['timestamps']) > 0  # Or we have history (ramping down)
+    )
+    
+    if collect_data:
         from datetime import datetime
         now = datetime.now()
         max_points = 100
         
-        # Collect CAEN current data
+        # Query actual device currents and voltages before collecting
+        if st.session_state.get('api_client'):
+            try:
+                for ch_num in range(1, 4):
+                    channel_status = st.session_state.api_client.caen_get_status(ch_num)
+                    st.session_state.caen_channels[ch_num]['current_mon'] = channel_status['current_mon']
+                    st.session_state.caen_channels[ch_num]['voltage_mon'] = channel_status['voltage_mon']
+                    st.session_state.caen_channels[ch_num]['power_on'] = channel_status['power_on']
+            except:
+                pass  # Use existing session state values if query fails
+        
+        # Collect CAEN current and voltage data
         for ch_num in range(1, 4):
-            if st.session_state.caen_channels[ch_num]['power_on']:
-                i_mon = st.session_state.caen_channels[ch_num]['current_mon']
-                st.session_state.caen_current_history[f'ch{ch_num}'].append(i_mon)
+            i_mon = st.session_state.caen_channels[ch_num]['current_mon']
+            v_mon = st.session_state.caen_channels[ch_num]['voltage_mon']
+            
+            st.session_state.caen_current_history[f'ch{ch_num}'].append(i_mon)
+            st.session_state.caen_voltage_history[f'ch{ch_num}'].append(v_mon)
         
         st.session_state.caen_current_history['timestamps'].append(now)
+        st.session_state.caen_voltage_history['timestamps'].append(now)
         
         # Trim to max points
         if len(st.session_state.caen_current_history['timestamps']) > max_points:
             for key in st.session_state.caen_current_history:
                 st.session_state.caen_current_history[key] = st.session_state.caen_current_history[key][-max_points:]
+            for key in st.session_state.caen_voltage_history:
+                st.session_state.caen_voltage_history[key] = st.session_state.caen_voltage_history[key][-max_points:]
+        
+        # Stop collecting if HV is off and voltages/currents are near zero
+        if not st.session_state.device_enabled.get('pmt_hv', False):
+            all_near_zero = True
+            for ch_num in range(1, 4):
+                v_mon = st.session_state.caen_channels[ch_num]['voltage_mon']
+                i_mon = st.session_state.caen_channels[ch_num]['current_mon']
+                if v_mon > 10 or i_mon > 1.0:  # Still ramping down
+                    all_near_zero = False
+                    break
+            
+            # Clear history if everything is at zero
+            if all_near_zero and len(st.session_state.caen_current_history['timestamps']) > 10:
+                st.session_state.caen_current_history = {
+                    'ch0': [], 'ch1': [], 'ch2': [], 'ch3': [],
+                    'timestamps': []
+                }
+                st.session_state.caen_voltage_history = {
+                    'ch0': [], 'ch1': [], 'ch2': [], 'ch3': [],
+                    'timestamps': []
+                }
     
     if st.session_state.device_enabled.get('sipm', False) and st.session_state.get('sipm_connected', False):
         from datetime import datetime
@@ -2185,6 +2606,23 @@ else:
                     'Current (µA)': st.session_state.caen_current_history[f'ch{idx}']
                 })
                 st.line_chart(i_df.set_index('Time'), height=150)
+    else:
+        st.info("Enable PMT HV to start monitoring")
+    
+    # Display CAEN HV voltage monitoring
+    st.markdown("**CAEN HV Voltage:**")
+    if len(st.session_state.caen_voltage_history['timestamps']) > 0:
+        
+        col1, col2, col3 = st.columns(3)
+        
+        for idx, col in enumerate([col1, col2, col3], start=1):
+            with col:
+                st.markdown(f"*Ch{idx}*")
+                v_df = pd.DataFrame({
+                    'Time': st.session_state.caen_voltage_history['timestamps'],
+                    'Voltage (V)': st.session_state.caen_voltage_history[f'ch{idx}']
+                })
+                st.line_chart(v_df.set_index('Time'), height=150)
     else:
         st.info("Enable PMT HV to start monitoring")
     
@@ -2227,7 +2665,7 @@ else:
             
             with col2:
                 board_temp = status.get('board_temp', 0)
-                if board_temp > 35:
+                if board_temp > 42:
                     temp_status = "⚠️ High"
                 elif board_temp > 30:
                     temp_status = "Normal"
@@ -2249,114 +2687,44 @@ else:
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        # Get available sequences (includes custom ones)
-        available_sequences = get_sequence_list()
+        # Simple sequence selection (no custom for now)
+        sequence_options = [
+            "Dark Current Check (10 min)",
+            "Single PMT Scan (3.5 hours)",
+            "Full PMT Scan (7 hours)"
+        ]
         
         sequence_type = st.selectbox(
             "Sequence Type:",
-            available_sequences,
-            index=available_sequences.index(st.session_state.selected_sequence) if st.session_state.selected_sequence in available_sequences else 0,
+            sequence_options,
             key='sequence_selector'
         )
-        
-        # Update session state when selection changes
-        if sequence_type != st.session_state.selected_sequence:
-            st.session_state.selected_sequence = sequence_type
-        
-        # Use session state value for display
-        sequence_type = st.session_state.selected_sequence
         
         # Show sequence details
         if "Dark Current" in sequence_type:
             st.info("""
             **Dark Current Check:**
-            1. Powers on all PMTs
-            2. Waits for stabilization (5 min)
-            3. Records baseline without signal
-            4. Checks for excessive dark current
+            - Measures baseline noise for all 3 PMTs
+            - Duration: 5 minutes
+            - No light source (laser off)
             """)
-            
-            # Option to view waveforms during dark current check
-            view_waveforms = st.checkbox("Enable waveform viewing during acquisition")
-            if view_waveforms:
-                st.caption("💡 Waveforms will be displayed in real-time during the dark current check")
         
         elif "Single PMT" in sequence_type:
-            # Only PMT1 and PMT2 are accessible (PMT3 is monitor only)
-            pmt_select = st.selectbox("Select PMT:", ["PMT 1", "PMT 2"])
+            pmt_select = st.selectbox("Select PMT:", ["PMT 1", "PMT 2"], key="single_pmt_select")
+            st.session_state.selected_pmt = pmt_select  # Store in session state
             st.info(f"""
-            **Single PMT Test - {pmt_select}:**
-            1. Powers on selected PMT
-            2. Moves robot to position
-            3. Configures signal generator & laser
-            4. Acquires data for specified runtime
-            5. Analyzes waveforms
-            
-            Note: PMT3 is a monitor PMT and not accessible by robot
+            **Single PMT Scan - {pmt_select}:**
+            - Scans one PMT at multiple angles
+            - Robot moves through zenith/azimuth positions
+            - Estimated time: ~30 minutes
             """)
         
         elif "Full PMT Scan" in sequence_type:
             st.info("""
             **Full PMT Scan:**
-            1. Dark current check (5 min)
-            2. For each accessible PMT (1, 2):
-               - Move robot to position
-               - Configure signal generator & laser
-               - Scan zenith: 0°, 30°, 60°, 90°
-               - Scan azimuth: 0°, 90°, 180°, 270°
-               - Record data at each position
-            3. Return robot to home
-            4. Power down safely
-            
-            **Total positions:** 24 (2 PMTs × 4 zenith × 3 azimuth)
-            **Estimated time:** 2 hours
-            
-            Note: PMT3 operates as monitor only
-            """)
-        
-        elif "Custom:" in sequence_type:
-            # Load saved custom sequence
-            custom_name = sequence_type.replace("Custom: ", "")
-            config = st.session_state.custom_sequences[custom_name]
-            
-            st.success(f"Loaded custom sequence: **{custom_name}**")
-            st.json(config)
-            
-            if st.button("🗑️ Delete This Sequence", key="delete_custom"):
-                del st.session_state.custom_sequences[custom_name]
-                st.success(f"Deleted sequence: {custom_name}")
-                st.rerun()
-        
-        elif "Create New Custom" in sequence_type:
-            st.markdown("**Create Custom Scan:**")
-            
-            # Name the custom sequence
-            custom_seq_name = st.text_input("Sequence Name:", 
-                                           placeholder="e.g., Quick Zenith Scan",
-                                           key="custom_name")
-            
-            col_a, col_b = st.columns(2)
-            with col_a:
-                # Only PMT1 and PMT2 selectable
-                pmts_to_scan = st.multiselect("PMTs:", ["PMT 1", "PMT 2"], default=["PMT 1"])
-                st.caption("PMT 3 is monitor-only")
-                zenith_angles = st.text_input("Zenith (°):", value="0, 30, 60, 90")
-            with col_b:
-                azimuth_angles = st.text_input("Azimuth (°):", value="0, 90, 180, 270")
-                runtime_per_pos = st.number_input("Runtime/Position (s):", value=60, step=10)
-            
-            # Calculate estimated time
-            n_pmts = len(pmts_to_scan)
-            n_zenith = len([x.strip() for x in zenith_angles.split(',') if x.strip()])
-            n_azimuth = len([x.strip() for x in azimuth_angles.split(',') if x.strip()])
-            total_positions = n_pmts * n_zenith * n_azimuth
-            estimated_time_min = (runtime_per_pos * total_positions) / 60
-            
-            st.info(f"""
-            **Estimated scan:**
-            - Total positions: {total_positions}
-            - Time per position: {runtime_per_pos}s
-            - Estimated total time: {estimated_time_min:.1f} minutes
+            - Scans both PMT1 and PMT2
+            - Complete angular characterization
+            - Estimated time: 2 hours
             """)
     
     with col2:
@@ -2389,63 +2757,132 @@ else:
     
     st.markdown("---")
     
-    # Run Control - Start only enabled when all systems ready
+    # Run Control - Use built-in functions
+    st.subheader("Run Control")
+
+    # Check if all required systems are ready
+    system_ready = (
+        st.session_state.system_coordinator is not None and
+        bool(st.session_state.pmt_serial_number["pmt1"]) and
+        bool(st.session_state.pmt_serial_number["pmt2"])
+    )
+
     col1, col2, col3, col4 = st.columns(4)
-    
-    # Check if all required systems are ready AND both PMT serial numbers are entered
-    can_start = all_systems_ready and bool(st.session_state.pmt_serial_number["pmt1"]) and bool(st.session_state.pmt_serial_number["pmt2"])
-    
+
     with col1:
         if not st.session_state.run_active:
             if st.button("▶ Start Run", 
                         use_container_width=True, 
                         type="primary",
-                        disabled=not can_start):
-                if can_start:
+                        disabled=not system_ready):
+                if system_ready:
+                    # Check if scheduled start is in the future
+                    # TODO: implement scheduled start
+                    if st.session_state.scheduled_start and st.session_state.scheduled_start > datetime.now():
+                        st.info(f"⏱️ Waiting until {st.session_state.scheduled_start.strftime('%Y-%m-%d %H:%M')}")
+                        st.warning("⚠️ Scheduled runs not yet implemented - starting immediately")
+                    
+                    # Reset state
                     st.session_state.run_active = True
                     st.session_state.run_progress = 0
-                    st.success("Run started!")
+                    st.session_state.run_result = None
+                    st.session_state.run_position = ""
+                    st.session_state.run_status_text = "Initializing..."
+                    st.session_state.stop_requested = False
+                    
+                    # Reset shared progress dictionary
+                    shared_state.progress_data['progress_pct'] = 0
+                    shared_state.progress_data['status_text'] = 'Initializing...'
+                    shared_state.progress_data['position'] = ''
+                    shared_state.progress_data['active'] = True
+                    shared_state.progress_data['result'] = None
+                    
+                    # Prepare parameters based on sequence type
+                    params = {}
+                    
+                    if "Dark Current" in sequence_type:
+                        params = {
+                            'pmt1_serial': st.session_state.pmt_serial_number["pmt1"],
+                            'pmt2_serial': st.session_state.pmt_serial_number["pmt2"],
+                            'duration': 10 #300  # 5 minutes
+                        }
+                    
+                    elif "Single PMT" in sequence_type:
+                        pmt_num = 1 if st.session_state.get('selected_pmt', 'PMT 1') == "PMT 1" else 2
+                        params = {
+                            'pmt_num': pmt_num,
+                            'serial': st.session_state.pmt_serial_number[f"pmt{pmt_num}"],
+                            'zeniths': [0, 10, 20, 30, 40, 50],
+                            'azimuths': [0, 90, 180, 270],
+                            'daq_runtime': 5
+                        }
+                    
+                    elif "Full PMT Scan" in sequence_type:
+                        params = {
+                            'pmt1_serial': st.session_state.pmt_serial_number["pmt1"],
+                            'pmt2_serial': st.session_state.pmt_serial_number["pmt2"],
+                            'zeniths': [0, 10, 20, 30, 40, 50],
+                            'azimuths': [0, 90, 180, 270],
+                            'daq_runtime': 5
+                        }
+                    
+                    # Start background thread
+                    thread = threading.Thread(
+                        target=run_sequence_worker,
+                        args=(st.session_state.system_coordinator, sequence_type, params),
+                        daemon=True,
+                        name="RunSequenceThread"
+                    )
+                    thread.start()
+                    st.session_state.run_thread = thread
+                    
+                    print(f"[GUI] Started {sequence_type} in background thread")
                     st.rerun()
-                else:
-                    st.error("Check system status and PMT serial number!")
-    
+
     with col2:
         if st.session_state.run_active:
-            if st.button("⏸ Pause", use_container_width=True):
-                st.warning("Run paused")
-    
+            if st.button("⏸ Pause", use_container_width=True, disabled=True):
+                st.caption("⚠️ Pause not supported")
+
     with col3:
         if st.session_state.run_active:
             if st.button("⏹ Stop", use_container_width=True):
+                # Note: Currently can't stop a running sequence gracefully
+                # TODO: implement a function stop
                 st.session_state.run_active = False
                 st.session_state.run_progress = 0
-                st.info("Run stopped")
+                st.warning("⏹ Run marked as stopped (actual scan may continue)")
                 st.rerun()
-    
+
     with col4:
-        # Save custom sequence - only show for custom scans
-        if "Create New Custom" in sequence_type:
-            if st.button("💾 Save Sequence", use_container_width=True):
-                if custom_seq_name:
-                    # Save the custom sequence configuration
-                    config = {
-                        'pmts': pmts_to_scan,
-                        'zenith': zenith_angles,
-                        'azimuth': azimuth_angles,
-                        'runtime_per_pos': runtime_per_pos,
-                        'created': datetime.now().strftime('%Y-%m-%d %H:%M')
-                    }
-                    save_custom_sequence(custom_seq_name, config)
-                    st.success(f"Saved: {custom_seq_name}")
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    st.error("Please enter a sequence name")
+        # View Logs button (not functional without subprocess)
+        if st.session_state.run_active:
+            if st.button("📋 View Logs", use_container_width=True, disabled=True):
+                st.caption("⚠️ Logs not available (no subprocess)")
     
-    if not can_start and not st.session_state.run_active:
+    # Check thread status and display result if complete
+    if st.session_state.run_thread is not None:
+        if not st.session_state.run_thread.is_alive():
+            # Thread finished!
+            st.session_state.run_active = False
+            
+            result = st.session_state.run_result
+            if result:
+                if result.get('status') == 'success':
+                    st.success(f"✓ {sequence_type} completed successfully!")
+                    st.balloons()
+                else:
+                    st.error(f"✗ {sequence_type} failed: {result.get('error', 'Unknown error')}")
+            
+            # Clear thread reference
+            st.session_state.run_thread = None
+            st.rerun()
+
+    # Show readiness status
+    if not system_ready and not st.session_state.run_active:
         reasons = []
-        if not all_systems_ready:
-            reasons.append("Enable all required devices")
+        if st.session_state.system_coordinator is None:
+            reasons.append("System coordinator not initialized")
         if not st.session_state.pmt_serial_number["pmt1"]:
             reasons.append("Enter PMT1 serial number")
         if not st.session_state.pmt_serial_number["pmt2"]:
@@ -2453,15 +2890,51 @@ else:
         
         st.warning(f"⚠️ System not ready: {', '.join(reasons)}")
     
+    # Live status display when running
+    if st.session_state.run_active:
+        st.markdown("---")
+        st.subheader("Run Status")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Script", st.session_state.get('run_script', 'Unknown'))
+        with col2:
+            st.metric("Status", "Running")
+        with col3:
+            # Check if process still alive
+            if hasattr(st.session_state, 'run_process'):
+                if st.session_state.run_process.poll() is None:
+                    st.metric("Process", "Active")
+                else:
+                    st.metric("Process", "Complete")
+                    st.session_state.run_active = False
+        
+        # Show live logs if requested
+        if st.session_state.get('show_logs', False):
+            with st.expander("📋 Live Output", expanded=True):
+                if hasattr(st.session_state, 'run_process'):
+                    # Read available output
+                    import select
+                    try:
+                        # Non-blocking read
+                        if select.select([st.session_state.run_process.stdout], [], [], 0)[0]:
+                            output = st.session_state.run_process.stdout.readline()
+                            if output:
+                                st.text(output.strip())
+                    except:
+                        st.caption("No output available")
+                
+                if st.button("✖ Close Logs"):
+                    st.session_state.show_logs = False
+                    st.rerun()
+    
     # Progress Display
     if st.session_state.run_active or st.session_state.run_progress > 0:
         st.markdown("---")
         st.subheader("Run Progress")
         
-        # Simulate progress
-        if st.session_state.run_active and st.session_state.run_progress < 100:
-            st.session_state.run_progress += 2
-        
+        # Display real progress from callback
         progress = st.session_state.run_progress / 100
         st.progress(progress)
         
@@ -2469,65 +2942,43 @@ else:
         with col1:
             st.metric("Progress", f"{st.session_state.run_progress}%")
         with col2:
-            st.metric("Current Position", "PMT 2, Z=30°")
+            st.metric("Current Position", st.session_state.run_position or "Initializing...")
         with col3:
-            st.metric("Events Recorded", "15,420")
+            st.metric("Status", st.session_state.run_status_text or "Starting...")
         
         # Show PMT-specific output paths
         if st.session_state.pmt_serial_number["pmt1"] or st.session_state.pmt_serial_number["pmt2"]:
             paths = []
             if st.session_state.pmt_serial_number["pmt1"]:
-                paths.append(f"PMT1: `/data/runs/{st.session_state.pmt_serial_number['pmt1']}/{run_name}/`")
+                paths.append(f"PMT1: `/home/hyperkaus/WaveDumpSaves/{run_name}/{st.session_state.pmt_serial_number['pmt1']}/`")
             if st.session_state.pmt_serial_number["pmt2"]:
-                paths.append(f"PMT2: `/data/runs/{st.session_state.pmt_serial_number['pmt2']}/{run_name}/`")
+                paths.append(f"PMT2: `/home/hyperkaus/WaveDumpSaves/{run_name}/{st.session_state.pmt_serial_number['pmt2']}/`")
             st.caption(f"📁 Saving to: {' | '.join(paths)}")
         
-        # Live log
+        # Live log - capture recent terminal output
         with st.expander("Live Log", expanded=False):
-            pmt_info = []
-            if st.session_state.pmt_serial_number["pmt1"]:
-                pmt_info.append(f"PMT1: {st.session_state.pmt_serial_number['pmt1']}")
-            if st.session_state.pmt_serial_number["pmt2"]:
-                pmt_info.append(f"PMT2: {st.session_state.pmt_serial_number['pmt2']}")
-            pmt_log = " | ".join(pmt_info) if pmt_info else "No PMT serial numbers set"
+            # Read recent lines from log file if it exists
+            log_lines = []
+            if hasattr(st.session_state, 'log_file') and st.session_state.log_file.exists():
+                try:
+                    with open(st.session_state.log_file, 'r') as f:
+                        # Get last 50 lines
+                        all_lines = f.readlines()
+                        log_lines = all_lines[-50:] if len(all_lines) > 50 else all_lines
+                except Exception as e:
+                    log_lines = [f"Error reading log: {e}\n"]
+            else:
+                log_lines = ["No log file available yet. Logs will appear after starting a run.\n"]
             
-            st.text(f"""
-[{datetime.now().strftime('%H:%M:%S')}] Run started: {run_name}
-[{datetime.now().strftime('%H:%M:%S')}] {pmt_log}
-[{datetime.now().strftime('%H:%M:%S')}] All devices ready
-[{datetime.now().strftime('%H:%M:%S')}] Dark current check completed
-[{datetime.now().strftime('%H:%M:%S')}] Moving to PMT 1, Zenith 0°
-[{datetime.now().strftime('%H:%M:%S')}] Acquiring data...
-[{datetime.now().strftime('%H:%M:%S')}] Position complete, organizing files by PMT serial number
-[{datetime.now().strftime('%H:%M:%S')}] Moving to next position...
-            """)
-        
-        # Waveform viewer for Dark Current Check
-        if "Dark Current" in sequence_type and view_waveforms:
-            with st.expander("📊 Live Waveforms", expanded=True):
-                # Mock waveform display
-                st.caption("Real-time waveform display during dark current measurement")
-                
-                # Generate mock waveform data
-                x = np.linspace(0, 1000, 1000)
-                noise = np.random.normal(0, 5, 1000)
-                baseline = np.zeros(1000) + 100
-                waveform = baseline + noise
-                
-                # Create simple chart
-                chart_data = pd.DataFrame({
-                    'Time (ns)': x,
-                    'ADC': waveform
-                })
-                st.line_chart(chart_data.set_index('Time (ns)'))
-                
-                st.caption("Mean: 100.2 ADC | RMS: 4.8 ADC | Events: 1,234")
+            # Display in monospace
+            st.code("".join(log_lines), language="log")
     
     st.markdown("---")
     
     # Recent Runs
     st.subheader("Recent Runs")
     
+    # TODO:implement actual recent runs 
     recent_runs = pd.DataFrame({
         'Run Name': ['run_20251105_001', 'run_20251104_003', 'run_20251104_002'],
         'PMT S/N': ['ZE1234', 'ZE1235', 'ZE1234'],

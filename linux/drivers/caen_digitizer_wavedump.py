@@ -20,6 +20,7 @@ from typing import Optional, List, Tuple, Dict
 from datetime import datetime
 from loguru import logger
 import sys
+from typing import Union
 
 
 class CAENDigitizerWaveDump:
@@ -42,8 +43,8 @@ class CAENDigitizerWaveDump:
     
     def __init__(
         self,
-        wavedump_path: str = "/usr/local/bin/WaveDump",
-        config_template: str = "configs/WaveDumpConfig_template.txt",
+        wavedump_path="/home/hyperkaus/CAEN/wavedump-3.10.6-augmented/src/wavedump",
+        config_template="./configs/wavedumpconfig_template.txt",
         working_dir: Optional[str] = None,
         kernel_module_required: bool = True
     ):
@@ -159,9 +160,10 @@ class CAENDigitizerWaveDump:
         self,
         run_duration: int,
         channels: List[int],
+        output_format: str = 'ASCII',  # 'ASCII' or 'BINARY'
         record_length: Optional[int] = None,
         post_trigger: Optional[int] = None,
-        trigger_channel: Optional[int] = None,
+        trigger_channel: Optional[Union[int, List[int]]] = None,
         trigger_threshold: Optional[int] = None,
         channel_trigger_mode: Optional[str] = None,
         other_params: Optional[Dict[str, any]] = None
@@ -184,6 +186,10 @@ class CAENDigitizerWaveDump:
         logger.info(f"  Duration: {run_duration}s")
         logger.info(f"  Channels: {channels}")
         
+        trigger_channels = []
+        if trigger_channel is not None:
+            trigger_channels = [trigger_channel] if isinstance(trigger_channel, int) else trigger_channel
+
         # Read template
         with open(self.config_template, 'r') as f:
             lines = f.readlines()
@@ -211,7 +217,14 @@ class CAENDigitizerWaveDump:
                     lines[i] = f"POST_TRIGGER  {post_trigger}\n"
                     logger.debug(f"  Set POST_TRIGGER to {post_trigger}%")
                     break
-        
+
+        # Set output file format
+        for i, line in enumerate(lines):
+            if 'OUTPUT_FILE_FORMAT' in line:
+                lines[i] = f"OUTPUT_FILE_FORMAT    {output_format}\n"
+                logger.info(f"Set output format to {output_format}")
+                break
+                
         # Enable/disable channels and set trigger parameters
         channel_sections = self._find_channel_sections(lines)
         
@@ -230,7 +243,7 @@ class CAENDigitizerWaveDump:
                         break
                 
                 # Set trigger threshold for specific channel if specified
-                if trigger_channel is not None and ch == trigger_channel and trigger_threshold is not None:
+                if trigger_channel is not None and ch in trigger_channels and trigger_threshold is not None:
                     for i in range(section_start, section_end):
                         if lines[i].strip().startswith("TRIGGER_THRESHOLD"):
                             lines[i] = f"TRIGGER_THRESHOLD      {trigger_threshold}\n"
@@ -238,7 +251,7 @@ class CAENDigitizerWaveDump:
                             break
                 
                 # Set channel trigger mode for specific channel if specified
-                if trigger_channel is not None and ch == trigger_channel and channel_trigger_mode is not None:
+                if trigger_channel is not None and ch in trigger_channels and channel_trigger_mode is not None:
                     for i in range(section_start, section_end):
                         if lines[i].strip().startswith("CHANNEL_TRIGGER"):
                             lines[i] = f"CHANNEL_TRIGGER        {channel_trigger_mode}\n"
@@ -283,7 +296,7 @@ class CAENDigitizerWaveDump:
             if stripped.startswith('[') and stripped.endswith(']'):
                 # Save previous channel section
                 if current_channel is not None and section_start is not None:
-                    channel_sections[current_channel] = (section_start, i)
+                    channel_sections[current_channel] = (section_start, i-1)
                 
                 # Start new channel section
                 try:
@@ -428,29 +441,30 @@ class CAENDigitizerWaveDump:
     # Data Retrieval
     # =========================================================================
     
-    def get_waveform(self, channel: int) -> Optional[Path]:
+    def get_wavefile(self, channel: int) -> Optional[Path]:
         """
-        Check if waveform file exists for a channel.
-        
-        Returns the file path if it exists. Actual parsing/analysis
-        should be done by separate offline tools.
+        Get waveform file for a specific channel.
+        Checks for both ASCII (.txt) and binary (.dat) formats.
         
         Args:
-            channel: Channel number (0-7)
+            channel: Channel number
             
         Returns:
-            Path to waveform file if exists, None otherwise
+            Path to waveform file, or None if not found
         """
-        wave_file = self.working_dir / f"wave{channel}.txt"
+        # Try both ASCII and binary formats
+        txt_file = self.working_dir / f"wave{channel}.txt"
+        dat_file = self.working_dir / f"wave{channel}.dat"
         
-        if wave_file.exists():
-            logger.debug(f"Ch{channel}: Waveform file found at {wave_file}")
-            return wave_file
+        if txt_file.exists():
+            return txt_file
+        elif dat_file.exists():
+            return dat_file
         else:
-            logger.debug(f"Ch{channel}: Waveform file not found")
+            logger.warning(f"Waveform file for channel {channel} not found (tried .txt and .dat)")
             return None
     
-    def get_all_waveforms(self, channels: List[int]) -> Dict[int, Path]:
+    def get_all_wavefiles(self, channels: List[int]) -> Dict[int, Path]:
         """
         Check which waveform files exist for given channels.
         
@@ -465,7 +479,7 @@ class CAENDigitizerWaveDump:
         waveform_files = {}
         
         for ch in channels:
-            wave_file = self.get_waveform(ch)
+            wave_file = self.get_wavefile(ch)
             if wave_file is not None:
                 waveform_files[ch] = wave_file
         
@@ -573,7 +587,7 @@ if __name__ == "__main__":
     
     if success:
         # Get waveforms
-        waveforms = digitizer.get_all_waveforms([2, 3, 4])
+        waveforms = digitizer.get_all_wavefiles([2, 3, 4])
         
         # Organize files
         digitizer.organize_files(
