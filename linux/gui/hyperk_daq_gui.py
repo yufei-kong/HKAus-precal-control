@@ -11,6 +11,7 @@ Usage:
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import time
+import threading
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
@@ -19,6 +20,15 @@ import sys
 import os
 from pathlib import Path
 import atexit
+from loguru import logger
+import warnings
+
+# Import shared state module (persists across Streamlit reruns)
+import shared_state
+
+# Suppress annoying ScriptRunContext warnings from threading
+warnings.filterwarnings('ignore', message='.*ScriptRunContext.*')
+warnings.filterwarnings('ignore', category=UserWarning, module='streamlit')
 
 # Add paths
 script_dir = Path(__file__).parent  # gui/
@@ -74,6 +84,130 @@ _sipm_supply = None
 _digitizer = None
 _system_coordinator = None
 _robot_controller = None
+
+# Use shared_state module for persistent data across reruns
+# This module is imported once and cached by Python
+
+# ============================================================================
+# THREADING HELPER FUNCTIONS FOR RUN SEQUENCES
+# ============================================================================
+
+def progress_callback(progress_pct, message, position=""):
+    """
+    Progress callback function called by robot controller during scan.
+    Updates shared progress dictionary (thread-safe).
+    
+    Args:
+        progress_pct: Progress percentage (0-100)
+        message: Status message describing current action
+        position: Current position string (e.g., "θ=30°, φ=90°"), optional
+    """
+    # Access the global persistent dict
+    shared_state.progress_data['progress_pct'] = int(progress_pct)
+    shared_state.progress_data['status_text'] = message
+    shared_state.progress_data['position'] = position
+    
+    # Print with or without position
+    if position:
+        print(f"[PROGRESS] {progress_pct}% - {message} @ {position}")
+    else:
+        print(f"[PROGRESS] {progress_pct}% - {message}")
+
+def run_sequence_worker(coordinator, sequence_type, params):
+    """
+    Worker function that runs in background thread.
+    Executes the run sequence and updates session state when complete.
+    
+    Args:
+        coordinator: SystemCoordinator instance
+        sequence_type: Type of sequence ("Dark Current", "Single PMT", etc.)
+        params: Dictionary of parameters for the sequence
+    """
+    # Suppress ScriptRunContext warnings from thread
+    import warnings
+    warnings.filterwarnings('ignore', message='.*ScriptRunContext.*')
+    
+    try:
+        print(f"[THREAD] Starting {sequence_type} sequence")
+        
+        # Mark as active in global dict
+        shared_state.progress_data['active'] = True
+        
+        if "Dark Current" in sequence_type:
+            result = coordinator.run_dark_current_check(
+                pmt1_serial=params['pmt1_serial'],
+                pmt2_serial=params['pmt2_serial'],
+                duration=params['duration'],
+                progress_callback=progress_callback
+            )
+            
+        elif "Single PMT" in sequence_type:
+            result = coordinator.run_single_pmt_scan(
+                pmt_number=params['pmt_num'],
+                serial=params['serial'],
+                zeniths=params['zeniths'],
+                azimuths=params['azimuths'],
+                daq_runtime=params['daq_runtime'],
+                progress_callback=progress_callback
+            )
+            
+        elif "Full PMT Scan" in sequence_type:
+            result = coordinator.run_full_scan(
+                pmt1_serial=params['pmt1_serial'],
+                pmt2_serial=params['pmt2_serial'],
+                zeniths=params['zeniths'],
+                azimuths=params['azimuths'],
+                daq_runtime=params['daq_runtime'],
+                progress_callback=progress_callback
+            )
+        else:
+            result = {'status': 'error', 'error': f'Unknown sequence type: {sequence_type}'}
+        
+        # Store result in global dict
+        shared_state.progress_data['result'] = result
+        shared_state.progress_data['active'] = False
+        
+        print(f"[THREAD] {sequence_type} completed: {result.get('status')}")
+        
+    except Exception as e:
+        print(f"[THREAD] ERROR: {e}")
+        shared_state.progress_data['result'] = {'status': 'error', 'error': str(e)}
+        shared_state.progress_data['active'] = False
+
+# Logger
+def setup_logging():
+    """Setup loguru logging to both console and file"""
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"hyperk_daq_{timestamp}.log"
+    
+    # Remove default handler (to avoid duplicates on reruns)
+    logger.remove()
+    
+    # Add console handler (like before)
+    logger.add(
+        sys.stderr,
+        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <5}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        level="DEBUG"
+    )
+    
+    # Add file handler
+    logger.add(
+        str(log_file),
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <5} | {name}:{function}:{line} - {message}",
+        level="DEBUG",
+        rotation="500 MB",  # Rotate if file gets too big
+        retention="30 days"  # Keep logs for 30 days
+    )
+    
+    logger.info(f"Logging to file: {log_file}")
+    return log_file
+
+# Call once at startup
+if 'log_file' not in st.session_state:
+    st.session_state.log_file = setup_logging()
 
 # Page config
 st.set_page_config(
@@ -343,43 +477,7 @@ def get_sequence_list():
     else:
         return default_sequences + ["Create New Custom Scan..."]
 
-# # Initialize hardware (add this section)
-# if 'system' not in st.session_state and not st.session_state.get('mock_mode', False):
-#     try:
-#         # Import required modules
-#         from xarm.wrapper import XArmAPI
-#         from drivers.xarm_pmt_controller import XArmPMTController
-#         from drivers.caen_digitizer_wavedump import CAENDigitizerWaveDump
-#         from drivers.system_coordinator import HyperKSystemCoordinator
-#         from api_client.device_api_client import WindowsDeviceClient
-        
-#         # Connect to robot
-#         arm = XArmAPI('192.168.1.xxx')  # ← YOUR ROBOT IP HERE
-#         arm.connect()
-        
-#         # Initialize digitizer
-#         digitizer = CAENDigitizerWaveDump(
-#             wavedump_path="/usr/local/bin/WaveDump",
-#             config_template="configs/WaveDumpConfig_template.txt"
-#         )
-        
-#         # Initialize robot controller
-#         robot = XArmPMTController(arm=arm, digitizer=digitizer)
-        
-#         # Initialize API client for Windows devices
-#         api_client = WindowsDeviceClient("192.168.0.186")  # ← YOUR WINDOWS IP HERE
-        
-#         # Create system coordinator
-#         st.session_state.system = HyperKSystemCoordinator(
-#             robot_controller=robot,
-#             api_client=api_client
-#         )
-        
-#         st.success("✓ All systems initialized")
-        
-#     except Exception as e:
-#         st.error(f"Initialization failed: {e}")
-#         st.session_state.system = None
+# # Initialize hardware
 
 # Initialize digitizer
 if 'digitizer' not in st.session_state:
@@ -567,6 +665,16 @@ if 'run_active' not in st.session_state:
     st.session_state.run_active = False
 if 'run_progress' not in st.session_state:
     st.session_state.run_progress = 0
+if 'run_thread' not in st.session_state:
+    st.session_state.run_thread = None
+if 'run_result' not in st.session_state:
+    st.session_state.run_result = None
+if 'run_position' not in st.session_state:
+    st.session_state.run_position = ""
+if 'run_status_text' not in st.session_state:
+    st.session_state.run_status_text = ""
+if 'stop_requested' not in st.session_state:
+    st.session_state.stop_requested = False
 if 'pmt_voltages' not in st.session_state:
     st.session_state.pmt_voltages = [1000, 1100, 950]
 if 'pmt_power' not in st.session_state:
@@ -1582,7 +1690,7 @@ if st.session_state.mode == "Setup & Monitor":
                         )
                     with col_t2:
                         st.metric("Board Temp", f"{board_temp:.2f} °C")
-                        if board_temp > 35:
+                        if board_temp > 42:
                             st.caption("⚠️ High")
                         elif board_temp > 30:
                             st.caption("Normal")
@@ -2238,6 +2346,23 @@ else:
     
     st.title("Run Sequence Mode")
     st.caption("Automated measurement sequences with coordinated device control")
+
+    # Auto-refresh when run is active to update progress display
+    if st.session_state.run_active:
+        count = st_autorefresh(interval=2000, key="run_sequence_autorefresh")
+    
+    # Sync progress data from thread-safe dictionary to session state
+    # (Background thread updates shared_state.progress_data, we copy to session_state on each rerun)
+    if shared_state.progress_data['active'] or shared_state.progress_data['progress_pct'] > 0:
+        st.session_state.run_progress = shared_state.progress_data['progress_pct']
+        st.session_state.run_status_text = shared_state.progress_data['status_text']
+        st.session_state.run_position = shared_state.progress_data['position']
+    
+    # Check if thread completed
+    if shared_state.progress_data['result'] is not None and st.session_state.run_active:
+        st.session_state.run_result = shared_state.progress_data['result']
+        st.session_state.run_active = False
+        shared_state.progress_data['active'] = False
     
     # PMT Serial Number Input - Two PMTs
     st.subheader("PMT Configuration")
@@ -2246,7 +2371,7 @@ else:
     with col1:
         pmt1_serial = st.text_input("PMT1 Serial Number:", 
                                    value=st.session_state.pmt_serial_number["pmt1"],
-                                   placeholder="e.g., ZE1234",
+                                   placeholder="e.g., EL5150-B",
                                    key="pmt1_serial_input",
                                    help="Serial number for PMT at position 1")
         st.session_state.pmt_serial_number["pmt1"] = pmt1_serial
@@ -2254,7 +2379,7 @@ else:
     with col2:
         pmt2_serial = st.text_input("PMT2 Serial Number:", 
                                    value=st.session_state.pmt_serial_number["pmt2"],
-                                   placeholder="e.g., ZE5678",
+                                   placeholder="e.g., EL7370-A",
                                    key="pmt2_serial_input",
                                    help="Serial number for PMT at position 2")
         st.session_state.pmt_serial_number["pmt2"] = pmt2_serial
@@ -2540,7 +2665,7 @@ else:
             
             with col2:
                 board_temp = status.get('board_temp', 0)
-                if board_temp > 35:
+                if board_temp > 42:
                     temp_status = "⚠️ High"
                 elif board_temp > 30:
                     temp_status = "Normal"
@@ -2579,7 +2704,6 @@ else:
         if "Dark Current" in sequence_type:
             st.info("""
             **Dark Current Check:**
-            - Python script: `dark_current_scan.py`
             - Measures baseline noise for all 3 PMTs
             - Duration: 5 minutes
             - No light source (laser off)
@@ -2587,9 +2711,9 @@ else:
         
         elif "Single PMT" in sequence_type:
             pmt_select = st.selectbox("Select PMT:", ["PMT 1", "PMT 2"], key="single_pmt_select")
+            st.session_state.selected_pmt = pmt_select  # Store in session state
             st.info(f"""
             **Single PMT Scan - {pmt_select}:**
-            - Python script: `single_pmt_scan.py`
             - Scans one PMT at multiple angles
             - Robot moves through zenith/azimuth positions
             - Estimated time: ~30 minutes
@@ -2598,7 +2722,6 @@ else:
         elif "Full PMT Scan" in sequence_type:
             st.info("""
             **Full PMT Scan:**
-            - Python script: `full_pmt_scan.py`
             - Scans both PMT1 and PMT2
             - Complete angular characterization
             - Estimated time: 2 hours
@@ -2654,62 +2777,66 @@ else:
                         disabled=not system_ready):
                 if system_ready:
                     # Check if scheduled start is in the future
+                    # TODO: implement scheduled start
                     if st.session_state.scheduled_start and st.session_state.scheduled_start > datetime.now():
                         st.info(f"⏱️ Waiting until {st.session_state.scheduled_start.strftime('%Y-%m-%d %H:%M')}")
-                        # In a real implementation, you'd start a background thread here
-                        # For now, just show the message
                         st.warning("⚠️ Scheduled runs not yet implemented - starting immediately")
                     
+                    # Reset state
                     st.session_state.run_active = True
+                    st.session_state.run_progress = 0
+                    st.session_state.run_result = None
+                    st.session_state.run_position = ""
+                    st.session_state.run_status_text = "Initializing..."
+                    st.session_state.stop_requested = False
                     
-                    try:
-                        # Note: Progress callback not implemented yet
-                        # For now, runs will execute without progress updates
-                        
-                        if "Dark Current" in sequence_type:
-                            result = st.session_state.system_coordinator.run_dark_current_check(
-                                pmt1_serial=st.session_state.pmt_serial_number["pmt1"],
-                                pmt2_serial=st.session_state.pmt_serial_number["pmt2"],
-                                duration=300,  # 5 minutes
-                                progress_callback=None  # TODO: Implement progress callback
-                            )
-                            
-                        elif "Single PMT" in sequence_type:
-                            # Get PMT selection
-                            pmt_num = 1 if pmt_select == "PMT 1" else 2
-                            pmt_serial = st.session_state.pmt_serial_number[f"pmt{pmt_num}"]
-                            
-                            result = st.session_state.system_coordinator.run_single_pmt_scan(
-                                pmt_number=pmt_num,
-                                serial=pmt_serial,
-                                zeniths=[0, 10, 20, 30, 40, 50],
-                                azimuths=[0, 90, 180, 270],
-                                daq_runtime=5,  # seconds per point
-                                progress_callback=None  # TODO: Implement progress callback
-                            )
-                            
-                        elif "Full PMT Scan" in sequence_type:
-                            result = st.session_state.system_coordinator.run_full_scan(
-                                pmt1_serial=st.session_state.pmt_serial_number["pmt1"],
-                                pmt2_serial=st.session_state.pmt_serial_number["pmt2"],
-                                zeniths=[0, 10, 20, 30, 40, 50],
-                                azimuths=[0, 90, 180, 270],
-                                daq_runtime=5,  # seconds per point
-                                progress_callback=None  # TODO: Implement progress callback
-                            )
-                        
-                        # Check result
-                        if result.get('status') == 'success':
-                            st.success(f"✓ {sequence_type} completed successfully!")
-                        else:
-                            st.error(f"✗ {sequence_type} failed: {result.get('error', 'Unknown error')}")
-                        
-                        st.session_state.run_active = False
-                        
-                    except Exception as e:
-                        st.error(f"Run sequence failed: {e}")
-                        st.session_state.run_active = False
+                    # Reset shared progress dictionary
+                    shared_state.progress_data['progress_pct'] = 0
+                    shared_state.progress_data['status_text'] = 'Initializing...'
+                    shared_state.progress_data['position'] = ''
+                    shared_state.progress_data['active'] = True
+                    shared_state.progress_data['result'] = None
                     
+                    # Prepare parameters based on sequence type
+                    params = {}
+                    
+                    if "Dark Current" in sequence_type:
+                        params = {
+                            'pmt1_serial': st.session_state.pmt_serial_number["pmt1"],
+                            'pmt2_serial': st.session_state.pmt_serial_number["pmt2"],
+                            'duration': 10 #300  # 5 minutes
+                        }
+                    
+                    elif "Single PMT" in sequence_type:
+                        pmt_num = 1 if st.session_state.get('selected_pmt', 'PMT 1') == "PMT 1" else 2
+                        params = {
+                            'pmt_num': pmt_num,
+                            'serial': st.session_state.pmt_serial_number[f"pmt{pmt_num}"],
+                            'zeniths': [0, 10, 20, 30, 40, 50],
+                            'azimuths': [0, 90, 180, 270],
+                            'daq_runtime': 5
+                        }
+                    
+                    elif "Full PMT Scan" in sequence_type:
+                        params = {
+                            'pmt1_serial': st.session_state.pmt_serial_number["pmt1"],
+                            'pmt2_serial': st.session_state.pmt_serial_number["pmt2"],
+                            'zeniths': [0, 10, 20, 30, 40, 50],
+                            'azimuths': [0, 90, 180, 270],
+                            'daq_runtime': 5
+                        }
+                    
+                    # Start background thread
+                    thread = threading.Thread(
+                        target=run_sequence_worker,
+                        args=(st.session_state.system_coordinator, sequence_type, params),
+                        daemon=True,
+                        name="RunSequenceThread"
+                    )
+                    thread.start()
+                    st.session_state.run_thread = thread
+                    
+                    print(f"[GUI] Started {sequence_type} in background thread")
                     st.rerun()
 
     with col2:
@@ -2721,6 +2848,7 @@ else:
         if st.session_state.run_active:
             if st.button("⏹ Stop", use_container_width=True):
                 # Note: Currently can't stop a running sequence gracefully
+                # TODO: implement a function stop
                 st.session_state.run_active = False
                 st.session_state.run_progress = 0
                 st.warning("⏹ Run marked as stopped (actual scan may continue)")
@@ -2731,6 +2859,24 @@ else:
         if st.session_state.run_active:
             if st.button("📋 View Logs", use_container_width=True, disabled=True):
                 st.caption("⚠️ Logs not available (no subprocess)")
+    
+    # Check thread status and display result if complete
+    if st.session_state.run_thread is not None:
+        if not st.session_state.run_thread.is_alive():
+            # Thread finished!
+            st.session_state.run_active = False
+            
+            result = st.session_state.run_result
+            if result:
+                if result.get('status') == 'success':
+                    st.success(f"✓ {sequence_type} completed successfully!")
+                    st.balloons()
+                else:
+                    st.error(f"✗ {sequence_type} failed: {result.get('error', 'Unknown error')}")
+            
+            # Clear thread reference
+            st.session_state.run_thread = None
+            st.rerun()
 
     # Show readiness status
     if not system_ready and not st.session_state.run_active:
@@ -2788,10 +2934,7 @@ else:
         st.markdown("---")
         st.subheader("Run Progress")
         
-        # Simulate progress
-        if st.session_state.run_active and st.session_state.run_progress < 100:
-            st.session_state.run_progress += 2
-        
+        # Display real progress from callback
         progress = st.session_state.run_progress / 100
         st.progress(progress)
         
@@ -2799,44 +2942,43 @@ else:
         with col1:
             st.metric("Progress", f"{st.session_state.run_progress}%")
         with col2:
-            st.metric("Current Position", "PMT 2, Z=30°")
+            st.metric("Current Position", st.session_state.run_position or "Initializing...")
         with col3:
-            st.metric("Events Recorded", "15,420")
+            st.metric("Status", st.session_state.run_status_text or "Starting...")
         
         # Show PMT-specific output paths
         if st.session_state.pmt_serial_number["pmt1"] or st.session_state.pmt_serial_number["pmt2"]:
             paths = []
             if st.session_state.pmt_serial_number["pmt1"]:
-                paths.append(f"PMT1: `/data/runs/{st.session_state.pmt_serial_number['pmt1']}/{run_name}/`")
+                paths.append(f"PMT1: `/home/hyperkaus/WaveDumpSaves/{run_name}/{st.session_state.pmt_serial_number['pmt1']}/`")
             if st.session_state.pmt_serial_number["pmt2"]:
-                paths.append(f"PMT2: `/data/runs/{st.session_state.pmt_serial_number['pmt2']}/{run_name}/`")
+                paths.append(f"PMT2: `/home/hyperkaus/WaveDumpSaves/{run_name}/{st.session_state.pmt_serial_number['pmt2']}/`")
             st.caption(f"📁 Saving to: {' | '.join(paths)}")
         
-        # Live log
+        # Live log - capture recent terminal output
         with st.expander("Live Log", expanded=False):
-            pmt_info = []
-            if st.session_state.pmt_serial_number["pmt1"]:
-                pmt_info.append(f"PMT1: {st.session_state.pmt_serial_number['pmt1']}")
-            if st.session_state.pmt_serial_number["pmt2"]:
-                pmt_info.append(f"PMT2: {st.session_state.pmt_serial_number['pmt2']}")
-            pmt_log = " | ".join(pmt_info) if pmt_info else "No PMT serial numbers set"
+            # Read recent lines from log file if it exists
+            log_lines = []
+            if hasattr(st.session_state, 'log_file') and st.session_state.log_file.exists():
+                try:
+                    with open(st.session_state.log_file, 'r') as f:
+                        # Get last 50 lines
+                        all_lines = f.readlines()
+                        log_lines = all_lines[-50:] if len(all_lines) > 50 else all_lines
+                except Exception as e:
+                    log_lines = [f"Error reading log: {e}\n"]
+            else:
+                log_lines = ["No log file available yet. Logs will appear after starting a run.\n"]
             
-            st.text(f"""
-[{datetime.now().strftime('%H:%M:%S')}] Run started: {run_name}
-[{datetime.now().strftime('%H:%M:%S')}] {pmt_log}
-[{datetime.now().strftime('%H:%M:%S')}] All devices ready
-[{datetime.now().strftime('%H:%M:%S')}] Dark current check completed
-[{datetime.now().strftime('%H:%M:%S')}] Moving to PMT 1, Zenith 0°
-[{datetime.now().strftime('%H:%M:%S')}] Acquiring data...
-[{datetime.now().strftime('%H:%M:%S')}] Position complete, organizing files by PMT serial number
-[{datetime.now().strftime('%H:%M:%S')}] Moving to next position...
-            """)
+            # Display in monospace
+            st.code("".join(log_lines), language="log")
     
     st.markdown("---")
     
     # Recent Runs
     st.subheader("Recent Runs")
     
+    # TODO:implement actual recent runs 
     recent_runs = pd.DataFrame({
         'Run Name': ['run_20251105_001', 'run_20251104_003', 'run_20251104_002'],
         'PMT S/N': ['ZE1234', 'ZE1235', 'ZE1234'],
