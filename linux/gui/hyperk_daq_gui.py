@@ -676,7 +676,7 @@ if 'run_status_text' not in st.session_state:
 if 'stop_requested' not in st.session_state:
     st.session_state.stop_requested = False
 if 'pmt_voltages' not in st.session_state:
-    st.session_state.pmt_voltages = [1000, 1100, 950]
+    st.session_state.pmt_voltages = [None, None, 1760]
 if 'pmt_power' not in st.session_state:
     st.session_state.pmt_power = [False, False, False]
 if 'pmt_ramping' not in st.session_state:
@@ -2395,6 +2395,32 @@ else:
                 st.info(f"⚠️ PMT1: Not set | 📁 PMT2: `/home/hyperkaus/WaveDumpSaves/scan_<timestamp>/{pmt2_serial}/`")
         else:
             st.warning("⚠️ Please enter PMT serial numbers before starting measurements")
+
+    col1, col2, col3 = st.columns([1, 1, 2])
+    
+    with col1:
+        pmt1_voltage = st.text_input("PMT1 Voltage (V):", 
+                                   value=st.session_state.pmt_voltages[0],
+                                   placeholder="e.g., 1800",
+                                   key="pmt1_voltage_input",
+                                   help="High Voltage value for PMT at position 1")
+        st.session_state.pmt_voltages[0] = pmt1_voltage
+    
+    with col2:
+        pmt2_voltage = st.text_input("PMT2 Voltage (V):", 
+                                   value=st.session_state.pmt_voltages[1],
+                                   placeholder="e.g., 1800",
+                                   key="pmt2_voltage_input",
+                                   help="High Voltage value for PMT at position 2")
+        st.session_state.pmt_voltages[1] = pmt2_voltage
+    
+    with col3:
+        st.write(" ")  # Spacer
+        if pmt1_voltage and pmt2_voltage:
+            st.info(f"EBB (at 1E+07) for PMT1: {pmt1_voltage}V | PMT2: {pmt2_voltage}V")
+
+        else:
+            st.warning("⚠️ Please enter PMT high voltage value before starting measurements")
     
     st.markdown("---")
     
@@ -2764,7 +2790,9 @@ else:
     system_ready = (
         st.session_state.system_coordinator is not None and
         bool(st.session_state.pmt_serial_number["pmt1"]) and
-        bool(st.session_state.pmt_serial_number["pmt2"])
+        bool(st.session_state.pmt_serial_number["pmt2"]) and
+        bool(st.session_state.pmt_voltages[0]) and
+        bool(st.session_state.pmt_voltages[1])
     )
 
     col1, col2, col3, col4 = st.columns(4)
@@ -2887,6 +2915,10 @@ else:
             reasons.append("Enter PMT1 serial number")
         if not st.session_state.pmt_serial_number["pmt2"]:
             reasons.append("Enter PMT2 serial number")
+        if not st.session_state.pmt_voltages[0]:
+            reasons.append("Enter PMT1 High Voltage")
+        if not st.session_state.pmt_voltages[1]:
+            reasons.append("Enter PMT2 High Voltage")
         
         st.warning(f"⚠️ System not ready: {', '.join(reasons)}")
     
