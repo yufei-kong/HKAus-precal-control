@@ -113,6 +113,108 @@ def progress_callback(progress_pct, message, position=""):
     else:
         print(f"[PROGRESS] {progress_pct}% - {message}")
 
+def log_run_completion(run_name, sequence_type, pmt_serials, status, start_time, end_time):
+    """
+    Log completed run to run_log.txt file.
+    
+    Args:
+        run_name: Name of the run
+        sequence_type: Type of sequence that was run
+        pmt_serials: String of PMT serial numbers (e.g., "ZE1234, ZE5678")
+        status: Run status ('success', 'failed', 'cancelled')
+        start_time: Datetime when run started
+        end_time: Datetime when run ended
+    """
+    try:
+        log_file = Path("run_log.txt")
+        
+        # Calculate duration
+        duration_seconds = (end_time - start_time).total_seconds()
+        hours = int(duration_seconds // 3600)
+        minutes = int((duration_seconds % 3600) // 60)
+        if hours > 0:
+            duration_str = f"{hours}h {minutes}m"
+        else:
+            duration_str = f"{minutes}m"
+        
+        # Format log entry
+        log_entry = (
+            f"[{end_time.strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"Run: {run_name} | "
+            f"Type: {sequence_type.split(' (')[0]} | "
+            f"PMTs: {pmt_serials} | "
+            f"Status: {status.upper()} | "
+            f"Duration: {duration_str}\n"
+        )
+        
+        # Append to log file
+        with open(log_file, 'a') as f:
+            f.write(log_entry)
+        
+        print(f"[RUN_LOG] {log_entry.strip()}")
+        logger.info(f"Run logged: {run_name} - {status}")
+        
+    except Exception as e:
+        print(f"[RUN_LOG] Error logging run: {e}")
+        logger.error(f"Failed to log run completion: {e}")
+
+
+def scheduled_start_worker(coordinator, sequence_type, params, delay_seconds):
+    """
+    Waits for specified delay then starts the run sequence.
+    Updates countdown in shared_state during waiting period.
+    
+    Args:
+        coordinator: SystemCoordinator instance
+        sequence_type: Type of sequence to run
+        params: Parameters for the sequence
+        delay_seconds: How many seconds to wait before starting
+    """
+    import warnings
+    warnings.filterwarnings('ignore', message='.*ScriptRunContext.*')
+    
+    try:
+        print(f"[SCHEDULER] Waiting {delay_seconds}s before starting {sequence_type}")
+        
+        # Mark as scheduled (not active yet)
+        shared_state.progress_data['scheduled'] = True
+        shared_state.progress_data['active'] = False
+        shared_state.progress_data['scheduled_start'] = datetime.now() + timedelta(seconds=delay_seconds)
+        shared_state.progress_data['delay_seconds'] = delay_seconds
+        shared_state.progress_data['cancelled'] = False
+        
+        # Countdown loop - check every second for cancellation
+        for remaining in range(delay_seconds, 0, -1):
+            # Check if cancelled
+            if shared_state.progress_data.get('cancelled', False):
+                print(f"[SCHEDULER] Scheduled run cancelled by user")
+                shared_state.progress_data['scheduled'] = False
+                shared_state.progress_data['result'] = {'status': 'cancelled', 'message': 'Scheduled start cancelled by user'}
+                return
+            
+            # Update countdown
+            shared_state.progress_data['countdown_seconds'] = remaining
+            time.sleep(1)
+        
+        # Delay complete - check one more time for cancellation
+        if shared_state.progress_data.get('cancelled', False):
+            print(f"[SCHEDULER] Scheduled run cancelled at last second")
+            shared_state.progress_data['scheduled'] = False
+            shared_state.progress_data['result'] = {'status': 'cancelled', 'message': 'Scheduled start cancelled'}
+            return
+        
+        print(f"[SCHEDULER] Delay complete, starting {sequence_type} now")
+        shared_state.progress_data['scheduled'] = False
+        
+        # Now run the actual sequence
+        run_sequence_worker(coordinator, sequence_type, params)
+        
+    except Exception as e:
+        print(f"[SCHEDULER] ERROR: {e}")
+        shared_state.progress_data['scheduled'] = False
+        shared_state.progress_data['result'] = {'status': 'error', 'error': str(e)}
+
+
 def run_sequence_worker(coordinator, sequence_type, params):
     """
     Worker function that runs in background thread.
@@ -675,6 +777,12 @@ if 'run_status_text' not in st.session_state:
     st.session_state.run_status_text = ""
 if 'stop_requested' not in st.session_state:
     st.session_state.stop_requested = False
+if 'run_scheduled' not in st.session_state:
+    st.session_state.run_scheduled = False  # Track if waiting for scheduled start
+if 'delay_hours' not in st.session_state:
+    st.session_state.delay_hours = 0  # Scheduled delay hours
+if 'delay_minutes' not in st.session_state:
+    st.session_state.delay_minutes = 0  # Scheduled delay minutes
 if 'pmt_voltages' not in st.session_state:
     st.session_state.pmt_voltages = [None, None, 1760]
 if 'pmt_power' not in st.session_state:
@@ -2347,22 +2455,34 @@ else:
     st.title("Run Sequence Mode")
     st.caption("Automated measurement sequences with coordinated device control")
 
-    # Auto-refresh when run is active to update progress display
-    if st.session_state.run_active:
-        count = st_autorefresh(interval=2000, key="run_sequence_autorefresh")
+    # Auto-refresh when run is active OR scheduled to update progress/countdown display
+    if st.session_state.run_active or st.session_state.run_scheduled:
+        count = st_autorefresh(interval=1000, key="run_sequence_autorefresh")  # 1 second for countdown
     
     # Sync progress data from thread-safe dictionary to session state
     # (Background thread updates shared_state.progress_data, we copy to session_state on each rerun)
+    
+    # Check if scheduled run transitioned to active
+    if shared_state.progress_data.get('scheduled', False):
+        st.session_state.run_scheduled = True
+        st.session_state.run_active = False
+    elif shared_state.progress_data.get('active', False):
+        st.session_state.run_scheduled = False
+        st.session_state.run_active = True
+    
+    # Update progress from active run
     if shared_state.progress_data['active'] or shared_state.progress_data['progress_pct'] > 0:
         st.session_state.run_progress = shared_state.progress_data['progress_pct']
         st.session_state.run_status_text = shared_state.progress_data['status_text']
         st.session_state.run_position = shared_state.progress_data['position']
     
-    # Check if thread completed
-    if shared_state.progress_data['result'] is not None and st.session_state.run_active:
+    # Check if thread completed or was cancelled
+    if shared_state.progress_data['result'] is not None:
         st.session_state.run_result = shared_state.progress_data['result']
         st.session_state.run_active = False
+        st.session_state.run_scheduled = False
         shared_state.progress_data['active'] = False
+        shared_state.progress_data['scheduled'] = False
     
     # PMT Serial Number Input - Two PMTs
     st.subheader("PMT Configuration")
@@ -2399,19 +2519,21 @@ else:
     col1, col2, col3 = st.columns([1, 1, 2])
     
     with col1:
-        pmt1_voltage = st.text_input("PMT1 Voltage (V):", 
-                                   value=st.session_state.pmt_voltages[0],
-                                   placeholder="e.g., 1800",
-                                   key="pmt1_voltage_input",
-                                   help="High Voltage value for PMT at position 1")
+        pmt1_voltage = st.number_input("PMT1 Voltage (V):",
+                                       min_value=0,
+                                       max_value=2000,
+                                       value=st.session_state.pmt_voltages[0],
+                                       key="pmt1_voltage_input",
+                                       help="High Voltage value for PMT at position 1")
         st.session_state.pmt_voltages[0] = pmt1_voltage
     
     with col2:
-        pmt2_voltage = st.text_input("PMT2 Voltage (V):", 
-                                   value=st.session_state.pmt_voltages[1],
-                                   placeholder="e.g., 1800",
-                                   key="pmt2_voltage_input",
-                                   help="High Voltage value for PMT at position 2")
+        pmt2_voltage = st.number_input("PMT2 Voltage (V):",
+                                       min_value=0,
+                                       max_value=2000,
+                                       value=st.session_state.pmt_voltages[1],
+                                       key="pmt2_voltage_input",
+                                       help="High Voltage value for PMT at position 2")
         st.session_state.pmt_voltages[1] = pmt2_voltage
     
     with col3:
@@ -2759,27 +2881,38 @@ else:
         run_name = st.text_input("Run Name:", 
                                 value=f"run_{datetime.now().strftime('%Y%m%d_%H%M')}")
         
-        # Scheduled start
-        schedule_run = st.checkbox("Schedule Start Time")
+        # Scheduled start - improved implementation
+        st.markdown("##### Scheduled Start (Optional)")
+        col_delay1, col_delay2 = st.columns(2)
         
-        if schedule_run:
-            delay_hours = st.number_input("Delay (hours):", 
-                                         min_value=0, 
-                                         max_value=24, 
-                                         value=2)
-            delay_minutes = st.number_input("Delay (minutes):", 
-                                           min_value=0, 
-                                           max_value=59, 
-                                           value=0)
-            
-            scheduled_time = datetime.now() + timedelta(hours=delay_hours, minutes=delay_minutes)
-            st.info(f"⏱️ {scheduled_time.strftime('%Y-%m-%d %H:%M')}")
-            
-            if st.button("Schedule Run", use_container_width=True):
-                st.session_state.scheduled_start = scheduled_time
-                st.success(f"Scheduled!")
+        with col_delay1:
+            delay_hours = st.number_input(
+                "Hours:",
+                min_value=0,
+                max_value=48,
+                value=st.session_state.delay_hours,
+                key='delay_hours_input',
+                help="Delay run start by this many hours"
+            )
+            st.session_state.delay_hours = delay_hours
+        
+        with col_delay2:
+            delay_minutes = st.number_input(
+                "Minutes:", 
+                min_value=0,
+                max_value=59,
+                value=st.session_state.delay_minutes,
+                key='delay_minutes_input',
+                help="Delay run start by this many minutes"
+            )
+            st.session_state.delay_minutes = delay_minutes
+        
+        total_delay_seconds = delay_hours * 3600 + delay_minutes * 60
+        if total_delay_seconds > 0:
+            start_time = datetime.now() + timedelta(seconds=total_delay_seconds)
+            st.info(f"🕐 Run will start at: **{start_time.strftime('%H:%M:%S')}**")
         else:
-            st.session_state.scheduled_start = None
+            st.caption("Set hours/minutes above to schedule a delayed start")
     
     st.markdown("---")
     
@@ -2798,74 +2931,113 @@ else:
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        if not st.session_state.run_active:
-            if st.button("▶ Start Run", 
-                        use_container_width=True, 
-                        type="primary",
-                        disabled=not system_ready):
-                if system_ready:
-                    # Check if scheduled start is in the future
-                    # TODO: implement scheduled start
-                    if st.session_state.scheduled_start and st.session_state.scheduled_start > datetime.now():
-                        st.info(f"⏱️ Waiting until {st.session_state.scheduled_start.strftime('%Y-%m-%d %H:%M')}")
-                        st.warning("⚠️ Scheduled runs not yet implemented - starting immediately")
-                    
-                    # Reset state
-                    st.session_state.run_active = True
-                    st.session_state.run_progress = 0
-                    st.session_state.run_result = None
-                    st.session_state.run_position = ""
-                    st.session_state.run_status_text = "Initializing..."
-                    st.session_state.stop_requested = False
-                    
-                    # Reset shared progress dictionary
-                    shared_state.progress_data['progress_pct'] = 0
-                    shared_state.progress_data['status_text'] = 'Initializing...'
-                    shared_state.progress_data['position'] = ''
+        # Show different button text based on state
+        if st.session_state.run_scheduled:
+            button_text = "Waiting (Scheduled)"
+            button_disabled = True
+            button_type = "secondary"
+        elif st.session_state.run_active:
+            button_text = "▶ Running..."
+            button_disabled = True
+            button_type = "secondary"
+        else:
+            total_delay = st.session_state.delay_hours * 3600 + st.session_state.delay_minutes * 60
+            if total_delay > 0:
+                button_text = f"▶ Schedule Start ({st.session_state.delay_hours}h {st.session_state.delay_minutes}m)"
+            else:
+                button_text = "▶ Start Run Now"
+            button_disabled = not system_ready
+            button_type = "primary"
+        
+        if st.button(button_text, 
+                    use_container_width=True, 
+                    type=button_type,
+                    disabled=button_disabled,
+                    key="start_run_button"):
+            if system_ready:
+                # Calculate delay
+                delay_seconds = st.session_state.delay_hours * 3600 + st.session_state.delay_minutes * 60
+                
+                # Reset state
+                st.session_state.run_active = False  # Not active yet if scheduled
+                st.session_state.run_scheduled = (delay_seconds > 0)  # Scheduled if delay > 0
+                st.session_state.run_progress = 0
+                st.session_state.run_result = None
+                st.session_state.run_position = ""
+                st.session_state.run_status_text = "Scheduled..." if delay_seconds > 0 else "Initializing..."
+                st.session_state.stop_requested = False
+                
+                # Store run metadata for logging
+                st.session_state.run_metadata = {
+                    'run_name': run_name,
+                    'sequence_type': sequence_type,
+                    'pmt_serials': f"{st.session_state.pmt_serial_number['pmt1']}, {st.session_state.pmt_serial_number['pmt2']}",
+                    'start_time': datetime.now()
+                }
+                
+                # Reset shared progress dictionary
+                shared_state.progress_data['progress_pct'] = 0
+                shared_state.progress_data['status_text'] = 'Scheduled...' if delay_seconds > 0 else 'Initializing...'
+                shared_state.progress_data['position'] = ''
+                shared_state.progress_data['active'] = False  # Not active yet if scheduled
+                shared_state.progress_data['scheduled'] = (delay_seconds > 0)
+                shared_state.progress_data['result'] = None
+                shared_state.progress_data['cancelled'] = False
+                
+                # Prepare parameters based on sequence type
+                params = {}
+                
+                if "Dark Current" in sequence_type:
+                    params = {
+                        'pmt1_serial': st.session_state.pmt_serial_number["pmt1"],
+                        'pmt2_serial': st.session_state.pmt_serial_number["pmt2"],
+                        'duration': 10 #300  # 5 minutes
+                    }
+                
+                elif "Single PMT" in sequence_type:
+                    pmt_num = 1 if st.session_state.get('selected_pmt', 'PMT 1') == "PMT 1" else 2
+                    params = {
+                        'pmt_num': pmt_num,
+                        'serial': st.session_state.pmt_serial_number[f"pmt{pmt_num}"],
+                        'zeniths': [0, 10, 20, 30, 40, 50],
+                        'azimuths': [0, 90, 180, 270],
+                        'daq_runtime': 5
+                    }
+                
+                elif "Full PMT Scan" in sequence_type:
+                    params = {
+                        'pmt1_serial': st.session_state.pmt_serial_number["pmt1"],
+                        'pmt2_serial': st.session_state.pmt_serial_number["pmt2"],
+                        'zeniths': [0, 10, 20, 30, 40, 50],
+                        'azimuths': [0, 90, 180, 270],
+                        'daq_runtime': 5
+                    }
+                
+                # Start background thread - use scheduled start worker if delay, otherwise normal worker
+                if delay_seconds > 0:
+                    # Scheduled start
+                    thread = threading.Thread(
+                        target=scheduled_start_worker,
+                        args=(st.session_state.system_coordinator, sequence_type, params, delay_seconds),
+                        daemon=True,
+                        name="ScheduledStartThread"
+                    )
+                    print(f"[GUI] Scheduled {sequence_type} to start in {delay_seconds}s ({st.session_state.delay_hours}h {st.session_state.delay_minutes}m)")
+                else:
+                    # Immediate start
+                    st.session_state.run_active = True  # Mark as active immediately
                     shared_state.progress_data['active'] = True
-                    shared_state.progress_data['result'] = None
-                    
-                    # Prepare parameters based on sequence type
-                    params = {}
-                    
-                    if "Dark Current" in sequence_type:
-                        params = {
-                            'pmt1_serial': st.session_state.pmt_serial_number["pmt1"],
-                            'pmt2_serial': st.session_state.pmt_serial_number["pmt2"],
-                            'duration': 10 #300  # 5 minutes
-                        }
-                    
-                    elif "Single PMT" in sequence_type:
-                        pmt_num = 1 if st.session_state.get('selected_pmt', 'PMT 1') == "PMT 1" else 2
-                        params = {
-                            'pmt_num': pmt_num,
-                            'serial': st.session_state.pmt_serial_number[f"pmt{pmt_num}"],
-                            'zeniths': [0, 10, 20, 30, 40, 50],
-                            'azimuths': [0, 90, 180, 270],
-                            'daq_runtime': 5
-                        }
-                    
-                    elif "Full PMT Scan" in sequence_type:
-                        params = {
-                            'pmt1_serial': st.session_state.pmt_serial_number["pmt1"],
-                            'pmt2_serial': st.session_state.pmt_serial_number["pmt2"],
-                            'zeniths': [0, 10, 20, 30, 40, 50],
-                            'azimuths': [0, 90, 180, 270],
-                            'daq_runtime': 5
-                        }
-                    
-                    # Start background thread
                     thread = threading.Thread(
                         target=run_sequence_worker,
                         args=(st.session_state.system_coordinator, sequence_type, params),
                         daemon=True,
                         name="RunSequenceThread"
                     )
-                    thread.start()
-                    st.session_state.run_thread = thread
-                    
-                    print(f"[GUI] Started {sequence_type} in background thread")
-                    st.rerun()
+                    print(f"[GUI] Started {sequence_type} immediately in background thread")
+                
+                thread.start()
+                st.session_state.run_thread = thread
+                st.rerun()
 
     with col2:
         if st.session_state.run_active:
@@ -2873,13 +3045,22 @@ else:
                 st.caption("⚠️ Pause not supported")
 
     with col3:
-        if st.session_state.run_active:
-            if st.button("⏹ Stop", use_container_width=True):
-                # Note: Currently can't stop a running sequence gracefully
-                # TODO: implement a function stop
-                st.session_state.run_active = False
-                st.session_state.run_progress = 0
-                st.warning("⏹ Run marked as stopped (actual scan may continue)")
+        # Show stop button for both scheduled and active runs
+        if st.session_state.run_active or st.session_state.run_scheduled:
+            button_label = "⏹ Cancel Scheduled Start" if st.session_state.run_scheduled else "⏹ Stop"
+            if st.button(button_label, use_container_width=True, type="secondary"):
+                if st.session_state.run_scheduled:
+                    # Cancel scheduled start
+                    shared_state.progress_data['cancelled'] = True
+                    st.session_state.run_scheduled = False
+                    st.session_state.run_active = False
+                    st.session_state.run_progress = 0
+                    st.warning("⏹ Scheduled start cancelled")
+                else:
+                    # Stop running sequence
+                    st.session_state.run_active = False
+                    st.session_state.run_progress = 0
+                    st.warning("⏹ Run marked as stopped (actual scan may continue)")
                 st.rerun()
 
     with col4:
@@ -2893,12 +3074,41 @@ else:
         if not st.session_state.run_thread.is_alive():
             # Thread finished!
             st.session_state.run_active = False
+            st.session_state.run_scheduled = False
             
             result = st.session_state.run_result
             if result:
+                # Log run completion if we have metadata
+                if hasattr(st.session_state, 'run_metadata'):
+                    metadata = st.session_state.run_metadata
+                    
+                    # Determine status
+                    if result.get('status') == 'success':
+                        status = 'success'
+                    elif result.get('status') == 'cancelled':
+                        status = 'cancelled'
+                    else:
+                        status = 'failed'
+                    
+                    # Log to file
+                    log_run_completion(
+                        run_name=metadata['run_name'],
+                        sequence_type=metadata['sequence_type'],
+                        pmt_serials=metadata['pmt_serials'],
+                        status=status,
+                        start_time=metadata['start_time'],
+                        end_time=datetime.now()
+                    )
+                    
+                    # Clear metadata
+                    del st.session_state.run_metadata
+                
+                # Show status message
                 if result.get('status') == 'success':
                     st.success(f"✓ {sequence_type} completed successfully!")
                     st.balloons()
+                elif result.get('status') == 'cancelled':
+                    st.info(f"⏹ {result.get('message', 'Scheduled start was cancelled')}")
                 else:
                     st.error(f"✗ {sequence_type} failed: {result.get('error', 'Unknown error')}")
             
@@ -2921,6 +3131,37 @@ else:
             reasons.append("Enter PMT2 High Voltage")
         
         st.warning(f"⚠️ System not ready: {', '.join(reasons)}")
+    
+    # Scheduled Start Countdown Display
+    if st.session_state.run_scheduled:
+        st.markdown("---")
+        st.subheader("⏰ Scheduled Start - Waiting")
+        
+        # Get countdown from shared state
+        countdown_seconds = shared_state.progress_data.get('countdown_seconds', 0)
+        scheduled_time = shared_state.progress_data.get('scheduled_start', datetime.now())
+        
+        # Format countdown as HH:MM:SS
+        hours = countdown_seconds // 3600
+        minutes = (countdown_seconds % 3600) // 60
+        seconds = countdown_seconds % 60
+        countdown_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Time Until Start", countdown_str)
+        with col2:
+            st.metric("Scheduled For", scheduled_time.strftime('%H:%M:%S'))
+        with col3:
+            st.metric("Sequence", sequence_type.split(' (')[0])  # Remove duration from display
+        
+        # Progress bar showing time elapsed
+        total_delay = shared_state.progress_data.get('delay_seconds', countdown_seconds)
+        if total_delay > 0:
+            progress = 1.0 - (countdown_seconds / total_delay)
+            st.progress(progress)
+        
+        st.info("💡 The run will start automatically when the countdown reaches zero. Press 'Cancel Scheduled Start' to abort.")
     
     # Live status display when running
     if st.session_state.run_active:
@@ -3007,20 +3248,36 @@ else:
     
     st.markdown("---")
     
-    # Recent Runs
-    st.subheader("Recent Runs")
+    # Run Log Information
+    st.subheader("Run Log")
     
-    # TODO:implement actual recent runs 
-    recent_runs = pd.DataFrame({
-        'Run Name': ['run_20251105_001', 'run_20251104_003', 'run_20251104_002'],
-        'PMT S/N': ['ZE1234', 'ZE1235', 'ZE1234'],
-        'Type': ['Full Scan', 'Single PMT (PMT1)', 'Dark Current'],
-        'Status': ['Complete', 'Complete', 'Complete'],
-        'Events': [36000, 5000, 500],
-        'Duration': ['2h 15m', '12m', '5m'],
-    })
+    log_file_path = Path("run_log.txt").absolute()
     
-    st.dataframe(recent_runs, use_container_width=True, hide_index=True)
+    st.info(f"📝 All completed runs are automatically logged to: `{log_file_path}`")
+    
+    # Show last few entries if file exists
+    if log_file_path.exists():
+        try:
+            with open(log_file_path, 'r') as f:
+                lines = f.readlines()
+            
+            if lines:
+                # Show last 5 entries
+                recent_lines = lines[-5:] if len(lines) >= 5 else lines
+                st.text_area(
+                    "Recent entries (last 5):", 
+                    value="".join(recent_lines),
+                    height=150,
+                    disabled=True
+                )
+                st.caption(f"Total runs logged: {len(lines)}")
+            else:
+                st.caption("No runs logged yet. Complete a run to see it here.")
+        except Exception as e:
+            st.warning(f"Could not read log file: {e}")
+    else:
+        st.caption("Log file will be created after first run completes.")
+
 
 # Footer
 st.markdown("---")
