@@ -316,37 +316,35 @@ class CAENDigitizerWaveDump:
     # Data Acquisition
     # =========================================================================
     
-    def acquire(self, timeout: Optional[int] = None, show_output: bool = True) -> bool:
+    def acquire(self, show_output: bool = True) -> bool:
         """
         Run data acquisition using WaveDump.
         
+        For augmented WaveDump builds with auto-exit after RUN_DURATION,
+        this waits indefinitely for WaveDump to finish naturally, ensuring
+        proper USB device cleanup. Using a timeout risks forcefully killing
+        WaveDump (SIGTERM/SIGKILL) which prevents cleanup and locks the USB device.
+        
         Args:
-            timeout: Maximum time to wait (seconds). If None, uses run_duration + 30s
             show_output: If True, print WaveDump output to console
             
         Returns:
             True if acquisition completed successfully
         """
-        if timeout is None:
-            # Default timeout: add 30 seconds buffer to configured run time
-            timeout = 300  # Default 5 minutes if we can't determine
-        
-        logger.info(f"Starting acquisition (timeout: {timeout}s)...")
+        logger.info(f"Starting acquisition (waiting for WaveDump to finish naturally)...")
         
         try:
             if show_output:
                 # Show output in real-time
                 result = subprocess.run(
                     [self.wavedump_path, str(self.config_file)],
-                    cwd=str(self.working_dir),
-                    timeout=timeout
+                    cwd=str(self.working_dir)
                 )
             else:
                 # Capture output (old behavior)
                 result = subprocess.run(
                     [self.wavedump_path, str(self.config_file)],
                     cwd=str(self.working_dir),
-                    timeout=timeout,
                     capture_output=True,
                     text=True
                 )
@@ -363,9 +361,6 @@ class CAENDigitizerWaveDump:
                     logger.error(f"Error output: {result.stderr}")
                 return False
                 
-        except subprocess.TimeoutExpired:
-            logger.error(f"Acquisition timed out after {timeout}s")
-            return False
         except Exception as e:
             logger.error(f"Acquisition error: {e}")
             return False
@@ -583,7 +578,7 @@ if __name__ == "__main__":
     )
     
     # Acquire data
-    success = digitizer.acquire(timeout=330)
+    success = digitizer.acquire()
     
     if success:
         # Get waveforms

@@ -628,9 +628,21 @@ if 'sipm_supply' not in st.session_state:
         st.session_state.sipm_supply = None
         st.session_state.sipm_connected = False
 
-# SiPM output state
+# SiPM output state - Query actual device state on startup
 if 'sipm_output_on' not in st.session_state:
-    st.session_state.sipm_output_on = False
+    if st.session_state.get('sipm_connected', False):
+        try:
+            # Query actual output state from device
+            actual_state = st.session_state.sipm_supply.get_output_status()
+            st.session_state.sipm_output_on = actual_state
+            print(f"✓ SiPM output state detected: {'ON' if actual_state else 'OFF'}")
+        except Exception as e:
+            # If query fails, assume OFF for safety
+            st.session_state.sipm_output_on = False
+            print(f"⚠ Could not query SiPM state, defaulting to OFF: {e}")
+    else:
+        # Not connected, default to OFF
+        st.session_state.sipm_output_on = False
 
 # CAEN HV channel history (for graphs)
 if 'caen_voltage_history' not in st.session_state:
@@ -792,13 +804,98 @@ if 'pmt_ramping' not in st.session_state:
 if 'scheduled_start' not in st.session_state:
     st.session_state.scheduled_start = None
 if 'laser_ld_on' not in st.session_state:
-    st.session_state.laser_ld_on = False
-if 'laser_tec_on' not in st.session_state:
-    st.session_state.laser_tec_on = False
+    # Query actual laser state from Windows API if available
+    if st.session_state.get('api_connected', False):
+        try:
+            print(f"DEBUG: Attempting to query laser state on initialization...")
+            status = st.session_state.api_client.laser_get_status()
+            st.session_state.laser_tec_on = status.get('tec_on', False)
+            st.session_state.laser_ld_on = status.get('ld_on', False)
+            print(f"✓ Laser state detected: TEC={'ON' if st.session_state.laser_tec_on else 'OFF'}, LD={'ON' if st.session_state.laser_ld_on else 'OFF'}")
+        except Exception as e:
+            # If query fails, default to OFF for safety
+            st.session_state.laser_tec_on = False
+            st.session_state.laser_ld_on = False
+            print(f"⚠ Could not query laser state, defaulting to OFF: {e}")
+    else:
+        print(f"DEBUG: API not connected (api_connected={st.session_state.get('api_connected', 'NOT SET')}), defaulting laser to OFF")
+        # API not connected, default to OFF
+        st.session_state.laser_tec_on = False
+        st.session_state.laser_ld_on = False
+elif 'laser_tec_on' not in st.session_state:
+    # Edge case: LD was set but TEC wasn't, query again
+    if st.session_state.get('api_connected', False):
+        try:
+            status = st.session_state.api_client.laser_get_status()
+            st.session_state.laser_tec_on = status.get('tec_on', False)
+            print(f"✓ Laser TEC state detected: {'ON' if st.session_state.laser_tec_on else 'OFF'}")
+        except Exception as e:
+            st.session_state.laser_tec_on = False
+            print(f"⚠ Could not query laser TEC state, defaulting to OFF: {e}")
+    else:
+        st.session_state.laser_tec_on = False
 if 'robot_position' not in st.session_state:
-    st.session_state.robot_position = 'home'
+    # Query actual robot position from robot if available
+    if st.session_state.get('robot_controller') is not None:
+        try:
+            # Get current joint angles
+            angles = st.session_state.robot_controller.get_current_position()[:6]
+            
+            # Define known positions with CORRECT naming:
+            # HOME = true vertical home position
+            # INTERMEDIATE = safe intermediate position (was called HOME in old code)
+            HOME = [0, 0, 0, 0, 0, -135]  # True home (vertical)
+            INTERMEDIATE = [0, -116.5, 5, 0, 0, -135]  # Safe intermediate position
+            PMT_TOP = [-0.0, -116.812436, -25.177883, 0.0, 51.990269, -135.0]
+            
+            # Helper function to check if angles match (within tolerance)
+            def angles_match(a1, a2, tolerance=1.0):
+                """Check if two angle arrays match within tolerance (degrees)"""
+                if a1 is None or a2 is None or len(a1) != len(a2):
+                    return False
+                return all(abs(a1[i] - a2[i]) < tolerance for i in range(len(a1)))
+            
+            # Detect position (check most specific first)
+            if angles_match(angles, PMT_TOP):
+                st.session_state.robot_position = 'pmt_top'
+                print(f"✓ Robot position detected: PMT Top")
+            elif angles_match(angles, INTERMEDIATE):
+                st.session_state.robot_position = 'intermediate'
+                print(f"✓ Robot position detected: Intermediate")
+            elif angles_match(angles, HOME):
+                st.session_state.robot_position = 'home'
+                print(f"✓ Robot position detected: Home")
+            else:
+                # Unknown position, default to home for safety
+                st.session_state.robot_position = 'home'
+                print(f"⚠ Robot at unknown position, defaulting to 'home'")
+                
+        except Exception as e:
+            # Exception during query, default to home
+            st.session_state.robot_position = 'home'
+            print(f"⚠ Error querying robot position, defaulting to 'home': {e}")
+    else:
+        # Robot not connected, default to home
+        st.session_state.robot_position = 'home'
 if 'linear_stage_pos' not in st.session_state:
-    st.session_state.linear_stage_pos = 1074 #PMT 1 position
+    # Query actual linear stage position from robot if available
+    if st.session_state.get('robot_controller') is not None:
+        try:
+            code, pos = st.session_state.robot_controller.arm.get_linear_track_pos()
+            if code == 0:  # Success
+                st.session_state.linear_stage_pos = int(pos)  # pos is a number, not array
+                print(f"✓ Linear stage position detected: {st.session_state.linear_stage_pos}mm")
+            else:
+                # Query failed, default to PMT1 position
+                st.session_state.linear_stage_pos = 1074
+                print(f"⚠ Could not query linear stage position (code={code}), defaulting to 1074mm")
+        except Exception as e:
+            # Exception during query, default to PMT1 position
+            st.session_state.linear_stage_pos = 1074
+            print(f"⚠ Error querying linear stage position, defaulting to 1074mm: {e}")
+    else:
+        # Robot not connected, default to PMT1 position
+        st.session_state.linear_stage_pos = 1074
 if 'system_coordinator' not in st.session_state:
     st.session_state.system_coordinator = None
 if 'robot_controller' not in st.session_state:
@@ -828,18 +925,47 @@ if 'device_states_synced' not in st.session_state:
         
         # Sync PMT HV state from device
         try:
-            # Check if any PMT channel is on
-            any_on = False
-            for ch in range(1, 4):
+            # Query each PMT channel individually
+            for ch in range(1, 4):  # Channels 1, 2, 3
                 status = st.session_state.api_client.caen_get_status(ch)
-                if status.get('power_on', False):
-                    any_on = True
-                    break
+                # Update pmt_power array (indexed 0-2 for channels 1-3)
+                st.session_state.pmt_power[ch-1] = status.get('power_on', False)
+            
+            # Set device_enabled based on whether any PMT is on
+            any_on = any(st.session_state.pmt_power)
             st.session_state.device_enabled['pmt_hv'] = any_on
-            print(f"Synced PMT HV state: {st.session_state.device_enabled['pmt_hv']}")
+            
+            pmt_count = sum(st.session_state.pmt_power)
+            print(f"Synced PMT HV state: device_enabled={any_on}, {pmt_count}/3 PMTs on")
         except Exception as e:
             print(f"Failed to sync PMT HV state: {e}")
             st.session_state.device_enabled['pmt_hv'] = False
+        
+        # Sync laser state from device
+        try:
+            status = st.session_state.api_client.laser_get_status()
+            # Update individual state variables for sidebar display
+            st.session_state.laser_tec_on = status.get('tec_on', False)
+            st.session_state.laser_ld_on = status.get('ld_on', False)
+            # Laser is considered "enabled" if both TEC and LD are on
+            laser_on = st.session_state.laser_tec_on and st.session_state.laser_ld_on
+            st.session_state.device_enabled['laser'] = laser_on
+            print(f"Synced laser state: device_enabled={laser_on}, TEC={st.session_state.laser_tec_on}, LD={st.session_state.laser_ld_on}")
+        except Exception as e:
+            print(f"Failed to sync laser state: {e}")
+            st.session_state.laser_tec_on = False
+            st.session_state.laser_ld_on = False
+            st.session_state.device_enabled['laser'] = False
+    
+    # Sync SiPM state from device
+    if st.session_state.get('sipm_connected', False):
+        try:
+            sipm_on = st.session_state.sipm_supply.get_output_status()
+            st.session_state.device_enabled['sipm'] = sipm_on
+            print(f"Synced SiPM state: {st.session_state.device_enabled['sipm']}")
+        except Exception as e:
+            print(f"Failed to sync SiPM state: {e}")
+            st.session_state.device_enabled['sipm'] = False
     
     st.session_state.device_states_synced = True
 
@@ -965,11 +1091,23 @@ with st.sidebar:
     # Individual device status
     st.caption("**Device Status:**")
     
-    # PMT HV - green only when ALL are on and NOT ramping
-    pmt_status = 'green' if pmt_ready else ('yellow' if any(st.session_state.pmt_power) or any(st.session_state.pmt_ramping) else 'red')
+    # PMT HV - Three-tier status:
+    # - Green: All 3 PMTs on and not ramping
+    # - Yellow/Orange: Some (but not all) PMTs on, OR any ramping
+    # - Red: No PMTs on
+    pmt_count_on = sum(st.session_state.pmt_power)
+    if pmt_ready:  # All 3 on and not ramping
+        pmt_status = 'green'
+    elif any(st.session_state.pmt_ramping) or pmt_count_on > 0:  # Ramping or some on
+        pmt_status = 'yellow'
+    else:  # None on
+        pmt_status = 'red'
+    
     st.markdown(f"{status_dot(pmt_status)} PMT HV System", unsafe_allow_html=True)
     if any(st.session_state.pmt_ramping):
         st.caption("  ↳ Ramping...")
+    elif pmt_count_on > 0 and pmt_count_on < 3:
+        st.caption(f"  ↳ {pmt_count_on}/3 PMTs on")
     
     # SiPM
     if st.session_state.get('sipm_connected', False):
@@ -2221,6 +2359,24 @@ if st.session_state.mode == "Setup & Monitor":
                     st.error("Kernel module not loaded. Run: `source sourceatstart.sh`")
                 if not status['connected']:
                     st.error("USB device not detected. Check connection.")
+                
+                # # Add reset button for "Can't open digitizer" errors
+                # st.markdown("---")
+                # st.markdown("**Troubleshooting:**")
+                # st.info("If you see 'Can't open the digitizer' errors, the USB device may be locked from a previous run.")
+                
+                # if st.button("🔄 Reset CAEN Driver", key="reset_caen_driver"):
+                #     with st.spinner("Resetting CAEN USB driver..."):
+                #         try:
+                #             if st.session_state.digitizer.reset_driver():
+                #                 st.success("✓ Driver reset successfully! Try acquisition again.")
+                #                 st.rerun()
+                #             else:
+                #                 st.error("❌ Driver reset failed. Check terminal for errors.")
+                #         except Exception as e:
+                #             st.error(f"❌ Reset failed: {e}")
+                
+                # st.caption("Note: Reset requires sudo privileges (passwordless sudo recommended)")
             
             # Configuration
             col1, col2 = st.columns(2)
@@ -2336,8 +2492,8 @@ if st.session_state.mode == "Setup & Monitor":
                                 )
                                 
                                 # Acquire data
+                                # The augmented WaveDump auto-exits after RUN_DURATION
                                 success = st.session_state.digitizer.acquire(
-                                    timeout=acq_duration + 30,
                                     show_output=False  # Don't show WaveDump output in GUI
                                 )
                                 
