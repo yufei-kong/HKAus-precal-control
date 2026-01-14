@@ -376,6 +376,9 @@ class XArmPMTController:
         current_point = 0
         visited_zero = False
         
+        # Track joint angles visited at azimuth=0 for safe return path
+        joint_history_at_az0 = []
+        
         Urob_change = 35  # Robot configuration change angle (degrees)
 
         for i, azimuth in enumerate(azimuths):
@@ -401,6 +404,9 @@ class XArmPMTController:
                         for buffer in self.buffer_positions:
                             rotated_buffer = self._rotate_base(buffer, azimuth)
                             self.move_to_position(rotated_buffer)
+                            # Save buffer positions to joint history if at azimuth=0
+                            if azimuth == 0:
+                                joint_history_at_az0.append(rotated_buffer)
                 else:  # Odd index: going DOWN (50 -> 40 -> 35 -> 30 -> 20 -> 10 -> 0)
                     if zenith <= Urob_change and not passed_rob_change:
                         passed_rob_change = True
@@ -409,6 +415,9 @@ class XArmPMTController:
                         for buffer in reversed(self.buffer_positions):
                             rotated_buffer = self._rotate_base(buffer, azimuth)
                             self.move_to_position(rotated_buffer)
+                            # Save buffer positions to joint history if at azimuth=0
+                            if azimuth == 0:
+                                joint_history_at_az0.append(rotated_buffer)
                 
                 # Move to scan point (without automatic buffer handling)
                 position_name = f"θ={zenith}°, φ={azimuth}°"
@@ -420,6 +429,10 @@ class XArmPMTController:
                 target_angles = self._rotate_base(self.joint_angles[zenith], azimuth)
                 self.move_to_position(target_angles)
                 
+                # Save joint angles at azimuth=0 for safe return path (including zenith=0)
+                if azimuth == 0:
+                    joint_history_at_az0.append(target_angles)
+                
                 # Stabilization delay
                 time.sleep(3)
                 
@@ -427,7 +440,7 @@ class XArmPMTController:
                 
                 # Configure and acquire
                 self.digitizer.configure(run_duration=daq_runtime, channels=channels)
-                self.digitizer.acquire(timeout=daq_runtime + 30)
+                self.digitizer.acquire()  # No timeout - augmented WaveDump handles timing
                 
                 # Organize files
                 save_dir = f"/home/hyperkaus/WaveDumpSaves/scan_{timestamp}/{serial}"
@@ -440,7 +453,26 @@ class XArmPMTController:
                 
                 current_point += 1
         
-        # Return to home
+        # Safe return to home - retrace path through visited positions
+        logger.info("Returning to home via safe path...")
+        if progress_callback:
+            progress_callback(95, "Returning to home...", "Retracing")
+        
+        # Step 1: Return to azimuth=0 at current position
+        logger.info("Step 1: Rotating to azimuth=0 at current zenith...")
+        current_angles = self.arm.get_servo_angle()[1]  # [1] is the angles array
+        current_angles[0] = 0  # Set base rotation to 0
+        self.arm.set_servo_angle(angle=current_angles, speed=self.tcp_speed, wait=True)
+        
+        # Step 2: Retrace back down through zenith angles visited at azimuth=0 (reversed)
+        if len(joint_history_at_az0) > 0 and zenith!=0:
+            logger.info(f"Step 2: Retracing through {len(joint_history_at_az0)} visited positions...")
+            for idx, target in enumerate(reversed(joint_history_at_az0)):
+                self.move_to_position(target)
+                logger.debug(f"Retracing {idx+1}/{len(joint_history_at_az0)}: safe position")
+        
+        # Step 3: Move to intermediate then home
+        logger.info("Step 3: Moving to intermediate then home...")
         self.move_to_intermediate()
         self.move_to_initial()
         

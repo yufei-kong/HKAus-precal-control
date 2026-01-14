@@ -2388,7 +2388,7 @@ if st.session_state.mode == "Setup & Monitor":
                     "Duration (seconds)",
                     min_value=1,
                     max_value=3600,
-                    value=5,
+                    value=300,
                     step=1,
                     key="manual_acq_duration"
                 )
@@ -2408,7 +2408,7 @@ if st.session_state.mode == "Setup & Monitor":
                 channels = st.multiselect(
                     "Channels to Record",
                     options=list(available_channels.keys()),
-                    default=[2, 3, 4],
+                    default=[0, 1, 2],
                     format_func=lambda x: available_channels[x],
                     key="manual_acq_channels"
                 )
@@ -2417,7 +2417,7 @@ if st.session_state.mode == "Setup & Monitor":
                     "Record Length (samples)",
                     min_value=128,
                     max_value=8192,
-                    value=1024,
+                    value=256,
                     step=128,
                     key="manual_record_length"
                 )
@@ -2428,7 +2428,7 @@ if st.session_state.mode == "Setup & Monitor":
                 trigger_channel = st.selectbox(
                     "Trigger Channel",
                     options=list(available_channels.keys()),
-                    index=4,  # Default to Ch4
+                    index=0,  # Default to Ch4
                     format_func=lambda x: available_channels[x],
                     key="manual_trigger_ch"
                 )
@@ -2437,7 +2437,7 @@ if st.session_state.mode == "Setup & Monitor":
                     "Trigger Threshold (ADC counts)",
                     min_value=1,
                     max_value=4095,
-                    value=1,
+                    value=100,
                     step=1,
                     help="Lower = more sensitive",
                     key="manual_trigger_thresh"
@@ -2455,7 +2455,7 @@ if st.session_state.mode == "Setup & Monitor":
             
             output_dir = st.text_input(
                 "Output Directory",
-                value="../WaveDumpSaves/manual_acquisition",
+                value="/home/hyperkaus/WaveDumpSaves/manual_acquisition",
                 key="manual_output_dir",
                 help="Where to save organized files"
             )
