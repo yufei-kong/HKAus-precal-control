@@ -759,9 +759,22 @@ if 'caen_channels' not in st.session_state:
             'status': {}
         }
 
-# Initialize Signal Generator session state
+# Initialize Signal Generator session state - Query actual device state on startup
 if 'siggen_enabled' not in st.session_state:
-    st.session_state.siggen_enabled = False
+    if st.session_state.get('api_client'):
+        try:
+            # Query actual output state from device
+            status = st.session_state.api_client.siggen_get_status(1)
+            actual_state = status.get('output_enabled', False)
+            st.session_state.siggen_enabled = actual_state
+            print(f"✓ Signal Generator output state detected: {'ON' if actual_state else 'OFF'}")
+        except Exception as e:
+            # If query fails, assume OFF for safety
+            st.session_state.siggen_enabled = False
+            print(f"⚠ Could not query Signal Generator state, defaulting to OFF: {e}")
+    else:
+        # Not connected, default to OFF
+        st.session_state.siggen_enabled = False
 
 # Initialize Laser session state
 if 'laser_tec_on' not in st.session_state:
@@ -929,10 +942,12 @@ if 'device_states_synced' not in st.session_state:
         try:
             status = st.session_state.api_client.siggen_get_status(1)
             st.session_state.device_enabled['siggen'] = status.get('output_enabled', False)
+            st.session_state.siggen_enabled = st.session_state.device_enabled['siggen']
             print(f"Synced siggen state: {st.session_state.device_enabled['siggen']}")
         except Exception as e:
             print(f"Failed to sync siggen state: {e}")
             st.session_state.device_enabled['siggen'] = False
+            st.session_state.siggen_enabled = False
         
         # Sync PMT HV state from device
         try:
@@ -1837,7 +1852,8 @@ if st.session_state.mode == "Setup & Monitor":
                         ):
                             try:
                                 st.session_state.api_client.siggen_enable_output(channel, True)
-                                st.session_state.device_enabled['siggen'] = True  # Sync session state
+                                st.session_state.device_enabled['siggen'] = True
+                                st.session_state.siggen_enabled = True
                                 time.sleep(1.0)  # Wait for device to update
                                 st.success("✓ Output enabled")
                                 st.rerun()
@@ -1853,7 +1869,8 @@ if st.session_state.mode == "Setup & Monitor":
                         ):
                             try:
                                 st.session_state.api_client.siggen_enable_output(channel, False)
-                                st.session_state.device_enabled['siggen'] = False  # Sync session state
+                                st.session_state.device_enabled['siggen'] = False
+                                st.session_state.siggen_enabled = False
                                 time.sleep(1.0)  # Wait for device to update
                                 st.info("✓ Output disabled")
                                 st.rerun()
@@ -2782,9 +2799,11 @@ else:
                     if not st.session_state.device_enabled['siggen']:
                         st.session_state.api_client.siggen_enable_output(channel, True)
                         st.session_state.device_enabled['siggen'] = True
+                        st.session_state.siggen_enabled = True
                     else:
                         st.session_state.api_client.siggen_enable_output(channel, False)
                         st.session_state.device_enabled['siggen'] = False
+                        st.session_state.siggen_enabled = False
                 except Exception as e:
                     st.error(f"Signal generator control failed: {e}")
             st.rerun()
@@ -3134,13 +3153,15 @@ else:
                 st.session_state.run_status_text = "Scheduled..." if delay_seconds > 0 else "Initializing..."
                 st.session_state.stop_requested = False
                 
-                # Store run metadata for logging
-                st.session_state.run_metadata = {
+                # Store run metadata for logging (both in session_state and shared_state)
+                metadata = {
                     'run_name': run_name,
                     'sequence_type': sequence_type,
                     'pmt_serials': f"{st.session_state.pmt_serial_number['pmt1']}, {st.session_state.pmt_serial_number['pmt2']}",
                     'start_time': datetime.now()
                 }
+                st.session_state.run_metadata = metadata
+                shared_state.progress_data['run_metadata'] = metadata  # Persist across restarts
                 
                 # Reset shared progress dictionary
                 shared_state.progress_data['progress_pct'] = 0
@@ -3245,9 +3266,20 @@ else:
             
             result = st.session_state.run_result
             if result:
-                # Log run completion if we have metadata
+                print(f"[DEBUG] Run completed with result: {result.get('status')}")
+                
+                # Try to get metadata from session_state first, then shared_state (for GUI restarts)
+                metadata = None
                 if hasattr(st.session_state, 'run_metadata'):
                     metadata = st.session_state.run_metadata
+                    print(f"[DEBUG] Using metadata from session_state")
+                elif 'run_metadata' in shared_state.progress_data:
+                    metadata = shared_state.progress_data['run_metadata']
+                    print(f"[DEBUG] Using metadata from shared_state (GUI was restarted)")
+                
+                # Log run completion if we have metadata
+                if metadata:
+                    print(f"[DEBUG] Logging run: {metadata['run_name']}")
                     
                     # Determine status
                     if result.get('status') == 'success':
@@ -3270,8 +3302,15 @@ else:
                         end_time=datetime.now()
                     )
                     
-                    # Clear metadata
-                    del st.session_state.run_metadata
+                    # Clear metadata from both locations
+                    if hasattr(st.session_state, 'run_metadata'):
+                        del st.session_state.run_metadata
+                    if 'run_metadata' in shared_state.progress_data:
+                        del shared_state.progress_data['run_metadata']
+                else:
+                    print(f"[DEBUG] No metadata found in session_state or shared_state - run will not be logged!")
+                    print(f"[DEBUG] Session state has run_metadata: {hasattr(st.session_state, 'run_metadata')}")
+                    print(f"[DEBUG] Shared state has run_metadata: {'run_metadata' in shared_state.progress_data}")
                 
                 # Show status message
                 if result.get('status') == 'success':
