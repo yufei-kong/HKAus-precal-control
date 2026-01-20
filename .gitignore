@@ -244,6 +244,7 @@ WaveDump_Saves/
 logs/
 *.log.*
 log_*.txt
+run_log.txt
 
 # Device-specific logs
 device_server.log

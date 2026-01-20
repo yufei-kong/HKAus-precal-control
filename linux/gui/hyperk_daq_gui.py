@@ -128,14 +128,21 @@ def log_run_completion(run_name, sequence_type, pmt_serials, status, start_time,
     try:
         log_file = Path("run_log.txt")
         
-        # Calculate duration
-        duration_seconds = (end_time - start_time).total_seconds()
-        hours = int(duration_seconds // 3600)
-        minutes = int((duration_seconds % 3600) // 60)
-        if hours > 0:
-            duration_str = f"{hours}h {minutes}m"
+        # Calculate duration in seconds
+        duration_seconds = int((end_time - start_time).total_seconds())
+        
+        # Format duration string
+        if duration_seconds >= 3600:
+            hours = duration_seconds // 3600
+            minutes = (duration_seconds % 3600) // 60
+            seconds = duration_seconds % 60
+            duration_str = f"{hours}h {minutes}m {seconds}s"
+        elif duration_seconds >= 60:
+            minutes = duration_seconds // 60
+            seconds = duration_seconds % 60
+            duration_str = f"{minutes}m {seconds}s"
         else:
-            duration_str = f"{minutes}m"
+            duration_str = f"{duration_seconds}s"
         
         # Format log entry
         log_entry = (
@@ -230,6 +237,10 @@ def run_sequence_worker(coordinator, sequence_type, params):
     warnings.filterwarnings('ignore', message='.*ScriptRunContext.*')
     
     try:
+        # Record actual start time (excludes any delay time)
+        actual_start_time = datetime.now()
+        shared_state.progress_data['actual_start_time'] = actual_start_time
+        
         print(f"[THREAD] Starting {sequence_type} sequence")
         
         # Mark as active in global dict
@@ -838,7 +849,7 @@ if 'robot_position' not in st.session_state:
     # Query actual robot position from robot if available
     if st.session_state.get('robot_controller') is not None:
         try:
-            # Get current joint angles
+            # Get current joint angles (returns 7 elements, we only need first 6)
             angles = st.session_state.robot_controller.get_current_position()[:6]
             
             # Define known positions with CORRECT naming:
@@ -3246,13 +3257,16 @@ else:
                     else:
                         status = 'failed'
                     
+                    # Get actual start time (excludes delay) from shared_state
+                    actual_start = shared_state.progress_data.get('actual_start_time', metadata['start_time'])
+                    
                     # Log to file
                     log_run_completion(
                         run_name=metadata['run_name'],
                         sequence_type=metadata['sequence_type'],
                         pmt_serials=metadata['pmt_serials'],
                         status=status,
-                        start_time=metadata['start_time'],
+                        start_time=actual_start,
                         end_time=datetime.now()
                     )
                     

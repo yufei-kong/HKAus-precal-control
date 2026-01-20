@@ -376,9 +376,6 @@ class XArmPMTController:
         current_point = 0
         visited_zero = False
         
-        # Track joint angles visited at azimuth=0 for safe return path
-        joint_history_at_az0 = []
-        
         Urob_change = 35  # Robot configuration change angle (degrees)
 
         for i, azimuth in enumerate(azimuths):
@@ -404,9 +401,6 @@ class XArmPMTController:
                         for buffer in self.buffer_positions:
                             rotated_buffer = self._rotate_base(buffer, azimuth)
                             self.move_to_position(rotated_buffer)
-                            # Save buffer positions to joint history if at azimuth=0
-                            if azimuth == 0:
-                                joint_history_at_az0.append(rotated_buffer)
                 else:  # Odd index: going DOWN (50 -> 40 -> 35 -> 30 -> 20 -> 10 -> 0)
                     if zenith <= Urob_change and not passed_rob_change:
                         passed_rob_change = True
@@ -415,9 +409,6 @@ class XArmPMTController:
                         for buffer in reversed(self.buffer_positions):
                             rotated_buffer = self._rotate_base(buffer, azimuth)
                             self.move_to_position(rotated_buffer)
-                            # Save buffer positions to joint history if at azimuth=0
-                            if azimuth == 0:
-                                joint_history_at_az0.append(rotated_buffer)
                 
                 # Move to scan point (without automatic buffer handling)
                 position_name = f"θ={zenith}°, φ={azimuth}°"
@@ -428,10 +419,6 @@ class XArmPMTController:
                 # Move directly to target position
                 target_angles = self._rotate_base(self.joint_angles[zenith], azimuth)
                 self.move_to_position(target_angles)
-                
-                # Save joint angles at azimuth=0 for safe return path (including zenith=0)
-                if azimuth == 0:
-                    joint_history_at_az0.append(target_angles)
                 
                 # Stabilization delay
                 time.sleep(3)
@@ -453,23 +440,23 @@ class XArmPMTController:
                 
                 current_point += 1
         
-        # Safe return to home - retrace path through visited positions
+        # Safe return to home - simple 3-step process
         logger.info("Returning to home via safe path...")
         if progress_callback:
             progress_callback(95, "Returning to home...", "Retracing")
         
-        # Step 1: Return to azimuth=0 at current position
-        logger.info("Step 1: Rotating to azimuth=0 at current zenith...")
-        current_angles = self.arm.get_servo_angle()[1]  # [1] is the angles array
-        current_angles[0] = 0  # Set base rotation to 0
-        self.arm.set_servo_angle(angle=current_angles, speed=self.tcp_speed, wait=True)
+        # Step 1: Move to zenith=0 (PMT_TOP) at current azimuth
+        logger.info("Step 1: Moving to θ=0° at current azimuth...")
+        current_angles = self.arm.get_servo_angle()[1]  # Get current position
+        current_azimuth = current_angles[0]  # Current base rotation
         
-        # Step 2: Retrace back down through zenith angles visited at azimuth=0 (reversed)
-        if len(joint_history_at_az0) > 0 and zenith!=0:
-            logger.info(f"Step 2: Retracing through {len(joint_history_at_az0)} visited positions...")
-            for idx, target in enumerate(reversed(joint_history_at_az0)):
-                self.move_to_position(target)
-                logger.debug(f"Retracing {idx+1}/{len(joint_history_at_az0)}: safe position")
+        # Move to PMT_TOP position rotated to current azimuth
+        pmt_top_at_current_az = self._rotate_base(self.PMT_TOP, current_azimuth)
+        self.move_to_position(pmt_top_at_current_az)
+        
+        # Step 2: Rotate to azimuth=0 while at zenith=0
+        logger.info("Step 2: Rotating to φ=0° at θ=0°...")
+        self.move_to_position(self.PMT_TOP)  # PMT_TOP is already at azimuth=0
         
         # Step 3: Move to intermediate then home
         logger.info("Step 3: Moving to intermediate then home...")
