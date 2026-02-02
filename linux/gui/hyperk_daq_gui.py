@@ -759,21 +759,20 @@ if 'caen_channels' not in st.session_state:
             'status': {}
         }
 
-# Initialize Signal Generator session state - Query actual device state on startup
+# Initialize Signal Generator session state
 if 'siggen_enabled' not in st.session_state:
-    if st.session_state.get('api_client'):
+    if st.session_state.get('siggen_connected', False):
         try:
-            # Query actual output state from device
-            status = st.session_state.api_client.siggen_get_status(1)
+            # Query actual output state from device via Windows API
+            status = st.session_state.api_client.siggen_get_status()
             actual_state = status.get('output_enabled', False)
             st.session_state.siggen_enabled = actual_state
-            print(f"✓ Signal Generator output state detected: {'ON' if actual_state else 'OFF'}")
+            print(f"✓ Signal generator output state detected: {'ON' if actual_state else 'OFF'}")
         except Exception as e:
             # If query fails, assume OFF for safety
             st.session_state.siggen_enabled = False
-            print(f"⚠ Could not query Signal Generator state, defaulting to OFF: {e}")
+            print(f"⚠ Could not query signal generator state, defaulting to OFF: {e}")
     else:
-        # Not connected, default to OFF
         st.session_state.siggen_enabled = False
 
 # Initialize Laser session state
@@ -942,12 +941,10 @@ if 'device_states_synced' not in st.session_state:
         try:
             status = st.session_state.api_client.siggen_get_status(1)
             st.session_state.device_enabled['siggen'] = status.get('output_enabled', False)
-            st.session_state.siggen_enabled = st.session_state.device_enabled['siggen']
             print(f"Synced siggen state: {st.session_state.device_enabled['siggen']}")
         except Exception as e:
             print(f"Failed to sync siggen state: {e}")
             st.session_state.device_enabled['siggen'] = False
-            st.session_state.siggen_enabled = False
         
         # Sync PMT HV state from device
         try:
@@ -1852,8 +1849,7 @@ if st.session_state.mode == "Setup & Monitor":
                         ):
                             try:
                                 st.session_state.api_client.siggen_enable_output(channel, True)
-                                st.session_state.device_enabled['siggen'] = True
-                                st.session_state.siggen_enabled = True
+                                st.session_state.device_enabled['siggen'] = True  # Sync session state
                                 time.sleep(1.0)  # Wait for device to update
                                 st.success("✓ Output enabled")
                                 st.rerun()
@@ -1869,8 +1865,7 @@ if st.session_state.mode == "Setup & Monitor":
                         ):
                             try:
                                 st.session_state.api_client.siggen_enable_output(channel, False)
-                                st.session_state.device_enabled['siggen'] = False
-                                st.session_state.siggen_enabled = False
+                                st.session_state.device_enabled['siggen'] = False  # Sync session state
                                 time.sleep(1.0)  # Wait for device to update
                                 st.info("✓ Output disabled")
                                 st.rerun()
@@ -2799,11 +2794,9 @@ else:
                     if not st.session_state.device_enabled['siggen']:
                         st.session_state.api_client.siggen_enable_output(channel, True)
                         st.session_state.device_enabled['siggen'] = True
-                        st.session_state.siggen_enabled = True
                     else:
                         st.session_state.api_client.siggen_enable_output(channel, False)
                         st.session_state.device_enabled['siggen'] = False
-                        st.session_state.siggen_enabled = False
                 except Exception as e:
                     st.error(f"Signal generator control failed: {e}")
             st.rerun()
@@ -3179,7 +3172,7 @@ else:
                     params = {
                         'pmt1_serial': st.session_state.pmt_serial_number["pmt1"],
                         'pmt2_serial': st.session_state.pmt_serial_number["pmt2"],
-                        'duration': 10 #300  # 5 minutes
+                        'duration': 300  # 5 minutes
                     }
                 
                 elif "Single PMT" in sequence_type:
@@ -3189,7 +3182,7 @@ else:
                         'serial': st.session_state.pmt_serial_number[f"pmt{pmt_num}"],
                         'zeniths': [0, 10, 20, 30, 40, 50],
                         'azimuths': [0, 90, 180, 270],
-                        'daq_runtime': 5
+                        'daq_runtime': 600
                     }
                 
                 elif "Full PMT Scan" in sequence_type:
@@ -3198,7 +3191,7 @@ else:
                         'pmt2_serial': st.session_state.pmt_serial_number["pmt2"],
                         'zeniths': [0, 10, 20, 30, 40, 50],
                         'azimuths': [0, 90, 180, 270],
-                        'daq_runtime': 5
+                        'daq_runtime': 600
                     }
                 
                 # Start background thread - use scheduled start worker if delay, otherwise normal worker
