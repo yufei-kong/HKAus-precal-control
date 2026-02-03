@@ -2476,19 +2476,34 @@ if st.session_state.mode == "Setup & Monitor":
             st.markdown("---")
             st.markdown("**Output Settings:**")
             
-            output_dir = st.text_input(
-                "Output Directory",
-                value="/home/hyperkaus/WaveDumpSaves/manual_acquisition",
-                key="manual_output_dir",
-                help="Where to save organized files"
-            )
+            col_out1, col_out2 = st.columns(2)
             
-            file_prefix = st.text_input(
-                "File Prefix",
-                value="manual",
-                key="manual_file_prefix",
-                help="Prefix for saved files"
-    )
+            with col_out1:
+                output_dir = st.text_input(
+                    "Output Directory",
+                    value="/home/hyperkaus/WaveDumpSaves/manual_acquisition",
+                    key="manual_output_dir",
+                    help="Where to save organized files"
+                )
+                
+                file_prefix = st.text_input(
+                    "File Prefix",
+                    value="manual",
+                    key="manual_file_prefix",
+                    help="Prefix for saved files"
+                )
+            
+            with col_out2:
+                st.markdown("**Display Options:**")
+                show_wavedump_output = st.checkbox(
+                    "Show WaveDump Terminal Output",
+                    value=False,
+                    key="show_wavedump_output",
+                    help="Display real-time WaveDump output below"
+                )
+            
+            # Manual acquisition state is in shared_state.manual_acq_data (thread-safe)
+            # No need to initialize - it's already defined in shared_state.py
             
             # Acquisition controls
             col_a, col_b, col_c = st.columns([2, 1, 1])
@@ -2498,81 +2513,222 @@ if st.session_state.mode == "Setup & Monitor":
                     "▶ Start Acquisition",
                     type="primary",
                     use_container_width=True,
-                    disabled=not digitizer_ready or st.session_state.run_active,
+                    disabled=not digitizer_ready or shared_state.manual_acq_data['active'] or st.session_state.run_active,
                     key="start_manual_acq"
                 ):
                     if digitizer_ready and channels:
-                        with st.spinner(f"Acquiring data for {acq_duration}s..."):
-                            try:
-                                # Configure digitizer
-                                st.session_state.digitizer.configure(
-                                    run_duration=acq_duration,
-                                    channels=channels,
-                                    trigger_channel=trigger_channel,
-                                    trigger_threshold=trigger_threshold,
-                                    channel_trigger_mode=trigger_mode,
-                                    record_length=record_length
-                                )
-                                
-                                # Acquire data
-                                # The augmented WaveDump auto-exits after RUN_DURATION
-                                success = st.session_state.digitizer.acquire(
-                                    show_output=False  # Don't show WaveDump output in GUI
-                                )
-                                
-                                if success:
-                                    # Check what files were created (before organizing)
-                                    waveform_files = st.session_state.digitizer.get_all_wavefiles(channels)
-                                    num_files = len(waveform_files)
-                                    
-                                    # Organize files
-                                    try:
-                                        # Use prefix or default to "data" if empty
-                                        prefix = file_prefix.strip() if file_prefix.strip() else "data"
-                                        
-                                        save_path = st.session_state.digitizer.organize_files(
-                                            save_dir=output_dir,
-                                            prefix=prefix,
-                                            channels=channels,
-                                            include_timestamp=True
-                                        )
-                                        
-                                        # Save info about acquisition
-                                        st.session_state.last_acquisition = {
-                                            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                            'duration': acq_duration,
-                                            'channels': channels,
-                                            'num_files': num_files,
-                                            'save_path': save_path,
-                                            'prefix': prefix
-                                        }
-                                        
-                                        st.success(f"✓ Acquisition complete! Files saved to:")
-                                        st.code(str(save_path))
-                                        
-                                        # Show organized files (use new paths)
-                                        for ch in channels:
-                                            filename = f"{prefix}_wave{ch}.txt"
-                                            st.text(f"  Ch{ch}: {filename}")
-                                        
-                                    except Exception as e:
-                                        st.error(f"File organization failed: {e}")
-                                        import traceback
-                                        st.text(traceback.format_exc())
-                                    
-                                    # Update digitizer status
-                                    st.session_state.digitizer_status = st.session_state.digitizer.get_status()
-                                    
-                                else:
-                                    st.error("❌ Acquisition failed - check WaveDump output")
+                        # Reset state in shared_state (thread-safe)
+                        shared_state.manual_acq_data['active'] = True
+                        shared_state.manual_acq_data['progress'] = 0
+                        shared_state.manual_acq_data['output'] = []
+                        shared_state.manual_acq_data['start_time'] = datetime.now()
+                        shared_state.manual_acq_data['result'] = None
+                        
+                        # Configure digitizer
+                        st.session_state.digitizer.configure(
+                            run_duration=acq_duration,
+                            channels=channels,
+                            trigger_channel=trigger_channel,
+                            trigger_threshold=trigger_threshold,
+                            channel_trigger_mode=trigger_mode,
+                            record_length=record_length
+                        )
+                        
+                        # Get references to pass to thread (can't access session_state from thread)
+                        digitizer = st.session_state.digitizer
+                        
+                        # Start acquisition in background thread
+                        def manual_acq_worker(digitizer_obj, channels_list, duration, out_dir, prefix_str):
+                            import warnings
+                            warnings.filterwarnings('ignore', message='.*ScriptRunContext.*')
                             
+                            try:
+                                # Acquire data with progress tracking
+                                import subprocess
+                                import time
+                                import select
+                                import sys
+                                
+                                # Start WaveDump with unbuffered output
+                                process = subprocess.Popen(
+                                    [digitizer_obj.wavedump_path, str(digitizer_obj.config_file)],
+                                    cwd=str(digitizer_obj.working_dir),
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT,
+                                    bufsize=0  # Unbuffered
+                                )
+                                
+                                start_time = time.time()
+                                output_buffer = ""
+                                
+                                # Poll for output with non-blocking reads
+                                while True:
+                                    # Check if process has finished
+                                    retcode = process.poll()
+                                    
+                                    # Use select to check if there's data available (non-blocking)
+                                    if sys.platform != 'win32':  # Linux/Mac
+                                        ready, _, _ = select.select([process.stdout], [], [], 0.1)
+                                        if ready:
+                                            # Read available data
+                                            try:
+                                                chunk = process.stdout.read(1024).decode('utf-8', errors='ignore')
+                                                if chunk:
+                                                    output_buffer += chunk
+                                                    # Split by newlines and process complete lines
+                                                    while '\n' in output_buffer:
+                                                        line, output_buffer = output_buffer.split('\n', 1)
+                                                        if line.strip():
+                                                            shared_state.manual_acq_data['output'].append(line.strip())
+                                                            # Keep only last 100 lines
+                                                            if len(shared_state.manual_acq_data['output']) > 100:
+                                                                shared_state.manual_acq_data['output'] = shared_state.manual_acq_data['output'][-100:]
+                                            except:
+                                                pass
+                                    else:  # Windows fallback
+                                        # On Windows, try non-blocking read
+                                        try:
+                                            line = process.stdout.readline()
+                                            if line:
+                                                shared_state.manual_acq_data['output'].append(line.strip())
+                                                if len(shared_state.manual_acq_data['output']) > 100:
+                                                    shared_state.manual_acq_data['output'] = shared_state.manual_acq_data['output'][-100:]
+                                        except:
+                                            pass
+                                    
+                                    # Update progress
+                                    elapsed = time.time() - start_time
+                                    progress = min(int((elapsed / duration) * 100), 99)
+                                    shared_state.manual_acq_data['progress'] = progress
+                                    
+                                    # Exit loop if process finished
+                                    if retcode is not None:
+                                        # Read any remaining output
+                                        try:
+                                            remaining = process.stdout.read().decode('utf-8', errors='ignore')
+                                            if remaining:
+                                                for line in remaining.split('\n'):
+                                                    if line.strip():
+                                                        shared_state.manual_acq_data['output'].append(line.strip())
+                                        except:
+                                            pass
+                                        break
+                                    
+                                    # Small sleep to prevent CPU spinning
+                                    time.sleep(0.1)
+                                
+                                # Process finished
+                                retcode = process.returncode if process.returncode is not None else process.wait()
+                                
+                                # Final progress
+                                shared_state.manual_acq_data['progress'] = 100
+                                
+                                if retcode == 0:
+                                    # Success - organize files
+                                    time.sleep(1)  # Let files settle
+                                    
+                                    waveform_files = digitizer_obj.get_all_wavefiles(channels_list)
+                                    prefix = prefix_str.strip() if prefix_str.strip() else "data"
+                                    
+                                    save_path = digitizer_obj.organize_files(
+                                        save_dir=out_dir,
+                                        prefix=prefix,
+                                        channels=channels_list,
+                                        include_timestamp=True
+                                    )
+                                    
+                                    # Save result in shared_state
+                                    shared_state.manual_acq_data['result'] = {
+                                        'timestamp': shared_state.manual_acq_data['start_time'].strftime("%Y-%m-%d %H:%M:%S"),
+                                        'duration': duration,
+                                        'channels': channels_list,
+                                        'num_files': len(waveform_files),
+                                        'save_path': save_path,
+                                        'prefix': prefix,
+                                        'status': 'success'
+                                    }
+                                    shared_state.manual_acq_data['output'].append(f"✓ Files saved to: {save_path}")
+                                else:
+                                    shared_state.manual_acq_data['result'] = {
+                                        'status': 'failed',
+                                        'error': f'WaveDump exited with code {retcode}'
+                                    }
+                                    shared_state.manual_acq_data['output'].append(f"❌ Acquisition failed (exit code {retcode})")
+                                
                             except Exception as e:
-                                st.error(f"❌ Acquisition error: {e}")
-                                import traceback
-                                st.text(traceback.format_exc())
+                                shared_state.manual_acq_data['result'] = {
+                                    'status': 'error',
+                                    'error': str(e)
+                                }
+                                shared_state.manual_acq_data['output'].append(f"❌ Error: {e}")
+                            finally:
+                                shared_state.manual_acq_data['active'] = False
+                        
+                        # Start thread with parameters
+                        import threading
+                        thread = threading.Thread(
+                            target=manual_acq_worker,
+                            args=(digitizer, channels, acq_duration, output_dir, file_prefix),
+                            daemon=True
+                        )
+                        thread.start()
+                        st.rerun()
                     else:
                         if not channels:
                             st.error("⚠ Please select at least one channel")
+            
+            # Progress display (when acquisition is active)
+            if shared_state.manual_acq_data['active']:
+                st.markdown("---")
+                st.markdown("### Acquisition in Progress")
+                
+                # Progress bar
+                progress = shared_state.manual_acq_data['progress']
+                st.progress(progress / 100.0)
+                
+                # Countdown/elapsed time
+                if shared_state.manual_acq_data['start_time']:
+                    elapsed = (datetime.now() - shared_state.manual_acq_data['start_time']).total_seconds()
+                    remaining = max(0, acq_duration - elapsed)
+                    
+                    col_time1, col_time2, col_time3 = st.columns(3)
+                    with col_time1:
+                        st.metric("Progress", f"{progress}%")
+                    with col_time2:
+                        st.metric("Elapsed", f"{int(elapsed)}s")
+                    with col_time3:
+                        st.metric("Remaining", f"{int(remaining)}s")
+                
+                # Manual refresh button instead of auto-refresh
+                if st.button("🔄 Refresh Progress", key="manual_acq_refresh_btn"):
+                    st.rerun()
+            
+            # Live terminal output (if enabled)
+            if show_wavedump_output and len(shared_state.manual_acq_data['output']) > 0:
+                st.markdown("---")
+                st.markdown("### WaveDump Output")
+                output_text = "\n".join(shared_state.manual_acq_data['output'][-50:])  # Last 50 lines
+                st.code(output_text, language="text")
+            
+            # Show last acquisition results
+            if shared_state.manual_acq_data['result']:
+                if not shared_state.manual_acq_data['active']:  # Only show when not running
+                    st.markdown("---")
+                    st.markdown("### Last Acquisition")
+                    
+                    acq = shared_state.manual_acq_data['result']
+                    if acq.get('status') == 'success':
+                        st.success(f"✓ Acquisition complete! Files saved to:")
+                        st.code(str(acq['save_path']))
+                        
+                        # Show organized files
+                        for ch in acq['channels']:
+                            filename = f"{acq['prefix']}_wave{ch}.txt"
+                            st.text(f"  Ch{ch}: {filename}")
+                    elif acq.get('status') == 'failed':
+                        st.error(f"❌ Acquisition failed: {acq.get('error', 'Unknown error')}")
+                    elif acq.get('status') == 'error':
+                        st.error(f"❌ Error: {acq.get('error', 'Unknown error')}")
             
             with col_b:
                 if st.button(

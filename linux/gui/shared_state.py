@@ -22,3 +22,13 @@ progress_data = {
     'delay_seconds': 0,        # Total delay in seconds for scheduled run
     'countdown_seconds': 0,    # Remaining seconds until scheduled run starts
 }
+
+# Thread-safe data for manual DAQ acquisitions
+# Updated by background thread, read by Streamlit GUI
+manual_acq_data = {
+    'active': False,           # True when manual acquisition is running
+    'progress': 0,             # Progress percentage (0-100)
+    'output': [],              # List of output lines from WaveDump
+    'start_time': None,        # Datetime when acquisition started
+    'result': None,            # Final result dictionary when complete
+}
