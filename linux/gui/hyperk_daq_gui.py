@@ -113,7 +113,7 @@ def progress_callback(progress_pct, message, position=""):
     else:
         print(f"[PROGRESS] {progress_pct}% - {message}")
 
-def log_run_completion(run_name, sequence_type, pmt_serials, status, start_time, end_time):
+def log_run_completion(run_name, sequence_type, pmt_serials, pmt_voltages, status, start_time, end_time):
     """
     Log completed run to run_log.txt file.
     
@@ -121,6 +121,7 @@ def log_run_completion(run_name, sequence_type, pmt_serials, status, start_time,
         run_name: Name of the run
         sequence_type: Type of sequence that was run
         pmt_serials: String of PMT serial numbers (e.g., "ZE1234, ZE5678")
+        pmt_voltages: String of PMT voltages (e.g., "1500V, 1600V")
         status: Run status ('success', 'failed', 'cancelled')
         start_time: Datetime when run started
         end_time: Datetime when run ended
@@ -150,6 +151,7 @@ def log_run_completion(run_name, sequence_type, pmt_serials, status, start_time,
             f"Run: {run_name} | "
             f"Type: {sequence_type.split(' (')[0]} | "
             f"PMTs: {pmt_serials} | "
+            f"HV: {pmt_voltages} | "
             f"Status: {status.upper()} | "
             f"Duration: {duration_str}\n"
         )
@@ -281,6 +283,42 @@ def run_sequence_worker(coordinator, sequence_type, params):
         shared_state.progress_data['active'] = False
         
         print(f"[THREAD] {sequence_type} completed: {result.get('status')}")
+        
+        # Log run completion directly from worker thread
+        try:
+            metadata = shared_state.progress_data.get('run_metadata')
+            if metadata:
+                print(f"[DEBUG] Worker thread logging run: {metadata['run_name']}")
+                
+                # Determine status
+                if result.get('status') == 'success':
+                    status = 'success'
+                elif result.get('status') == 'cancelled':
+                    status = 'cancelled'
+                else:
+                    status = 'failed'
+                
+                # Get actual start time (excludes delay)
+                actual_start = shared_state.progress_data.get('actual_start_time', metadata['start_time'])
+                
+                # Log to file
+                log_run_completion(
+                    run_name=metadata['run_name'],
+                    sequence_type=metadata['sequence_type'],
+                    pmt_serials=metadata['pmt_serials'],
+                    pmt_voltages=metadata['pmt_voltages'],
+                    status=status,
+                    start_time=actual_start,
+                    end_time=datetime.now()
+                )
+                
+                # Clear metadata after logging
+                if 'run_metadata' in shared_state.progress_data:
+                    del shared_state.progress_data['run_metadata']
+            else:
+                print(f"[DEBUG] Worker thread: No metadata found - run not logged")
+        except Exception as e:
+            print(f"[DEBUG] Worker thread logging failed: {e}")
         
     except Exception as e:
         print(f"[THREAD] ERROR: {e}")
@@ -646,7 +684,7 @@ if 'sipm_output_on' not in st.session_state:
             # Query actual output state from device
             actual_state = st.session_state.sipm_supply.get_output_status()
             st.session_state.sipm_output_on = actual_state
-            print(f"✓ SiPM output state detected: {'ON' if actual_state else 'OFF'}")
+            logger.info(f"✓ SiPM output state detected: {'ON' if actual_state else 'OFF'}")
         except Exception as e:
             # If query fails, assume OFF for safety
             st.session_state.sipm_output_on = False
@@ -690,11 +728,11 @@ if 'api_client' not in st.session_state:
                 # Store globally for cleanup
                 _api_client = api_client
                 
-                print("✓ Connected to Windows API server")
+                logger.info("✓ Connected to Windows API server")
             else:
                 st.session_state.api_client = None
                 st.session_state.api_connected = False
-                print("✗ Windows API server not responding")
+                logger.warning("✗ Windows API server not responding")
                 
         except Exception as e:
             st.session_state.api_client = None
@@ -733,7 +771,7 @@ if 'robot_controller' not in st.session_state:
             _robot_controller = robot_controller
             _system_coordinator = system_coordinator
             
-            print("✓ Robot controller and system coordinator initialized")
+            logger.info("✓ Robot controller and system coordinator initialized")
             
         except Exception as e:
             st.session_state.robot_controller = None
@@ -767,7 +805,7 @@ if 'siggen_enabled' not in st.session_state:
             status = st.session_state.api_client.siggen_get_status()
             actual_state = status.get('output_enabled', False)
             st.session_state.siggen_enabled = actual_state
-            print(f"✓ Signal generator output state detected: {'ON' if actual_state else 'OFF'}")
+            logger.info(f"✓ Signal generator output state detected: {'ON' if actual_state else 'OFF'}")
         except Exception as e:
             # If query fails, assume OFF for safety
             st.session_state.siggen_enabled = False
@@ -834,7 +872,7 @@ if 'laser_ld_on' not in st.session_state:
             status = st.session_state.api_client.laser_get_status()
             st.session_state.laser_tec_on = status.get('tec_on', False)
             st.session_state.laser_ld_on = status.get('ld_on', False)
-            print(f"✓ Laser state detected: TEC={'ON' if st.session_state.laser_tec_on else 'OFF'}, LD={'ON' if st.session_state.laser_ld_on else 'OFF'}")
+            logger.info(f"✓ Laser state detected: TEC={'ON' if st.session_state.laser_tec_on else 'OFF'}, LD={'ON' if st.session_state.laser_ld_on else 'OFF'}")
         except Exception as e:
             # If query fails, default to OFF for safety
             st.session_state.laser_tec_on = False
@@ -851,7 +889,7 @@ elif 'laser_tec_on' not in st.session_state:
         try:
             status = st.session_state.api_client.laser_get_status()
             st.session_state.laser_tec_on = status.get('tec_on', False)
-            print(f"✓ Laser TEC state detected: {'ON' if st.session_state.laser_tec_on else 'OFF'}")
+            logger.info(f"✓ Laser TEC state detected: {'ON' if st.session_state.laser_tec_on else 'OFF'}")
         except Exception as e:
             st.session_state.laser_tec_on = False
             print(f"⚠ Could not query laser TEC state, defaulting to OFF: {e}")
@@ -881,13 +919,13 @@ if 'robot_position' not in st.session_state:
             # Detect position (check most specific first)
             if angles_match(angles, PMT_TOP):
                 st.session_state.robot_position = 'pmt_top'
-                print(f"✓ Robot position detected: PMT Top")
+                logger.info(f"✓ Robot position detected: PMT Top")
             elif angles_match(angles, INTERMEDIATE):
                 st.session_state.robot_position = 'intermediate'
-                print(f"✓ Robot position detected: Intermediate")
+                logger.info(f"✓ Robot position detected: Intermediate")
             elif angles_match(angles, HOME):
                 st.session_state.robot_position = 'home'
-                print(f"✓ Robot position detected: Home")
+                logger.info(f"✓ Robot position detected: Home")
             else:
                 # Unknown position, default to home for safety
                 st.session_state.robot_position = 'home'
@@ -907,7 +945,7 @@ if 'linear_stage_pos' not in st.session_state:
             code, pos = st.session_state.robot_controller.arm.get_linear_track_pos()
             if code == 0:  # Success
                 st.session_state.linear_stage_pos = int(pos)  # pos is a number, not array
-                print(f"✓ Linear stage position detected: {st.session_state.linear_stage_pos}mm")
+                logger.info(f"✓ Linear stage position detected: {st.session_state.linear_stage_pos}mm")
             else:
                 # Query failed, default to PMT1 position
                 st.session_state.linear_stage_pos = 1074
@@ -941,7 +979,7 @@ if 'device_states_synced' not in st.session_state:
         try:
             status = st.session_state.api_client.siggen_get_status(1)
             st.session_state.device_enabled['siggen'] = status.get('output_enabled', False)
-            print(f"Synced siggen state: {st.session_state.device_enabled['siggen']}")
+            logger.info(f"Synced siggen state: {st.session_state.device_enabled['siggen']}")
         except Exception as e:
             print(f"Failed to sync siggen state: {e}")
             st.session_state.device_enabled['siggen'] = False
@@ -959,7 +997,7 @@ if 'device_states_synced' not in st.session_state:
             st.session_state.device_enabled['pmt_hv'] = any_on
             
             pmt_count = sum(st.session_state.pmt_power)
-            print(f"Synced PMT HV state: device_enabled={any_on}, {pmt_count}/3 PMTs on")
+            logger.info(f"Synced PMT HV state: device_enabled={any_on}, {pmt_count}/3 PMTs on")
         except Exception as e:
             print(f"Failed to sync PMT HV state: {e}")
             st.session_state.device_enabled['pmt_hv'] = False
@@ -973,7 +1011,7 @@ if 'device_states_synced' not in st.session_state:
             # Laser is considered "enabled" if both TEC and LD are on
             laser_on = st.session_state.laser_tec_on and st.session_state.laser_ld_on
             st.session_state.device_enabled['laser'] = laser_on
-            print(f"Synced laser state: device_enabled={laser_on}, TEC={st.session_state.laser_tec_on}, LD={st.session_state.laser_ld_on}")
+            logger.info(f"Synced laser state: device_enabled={laser_on}, TEC={st.session_state.laser_tec_on}, LD={st.session_state.laser_ld_on}")
         except Exception as e:
             print(f"Failed to sync laser state: {e}")
             st.session_state.laser_tec_on = False
@@ -985,7 +1023,7 @@ if 'device_states_synced' not in st.session_state:
         try:
             sipm_on = st.session_state.sipm_supply.get_output_status()
             st.session_state.device_enabled['sipm'] = sipm_on
-            print(f"Synced SiPM state: {st.session_state.device_enabled['sipm']}")
+            logger.info(f"Synced SiPM state: {st.session_state.device_enabled['sipm']}")
         except Exception as e:
             print(f"Failed to sync SiPM state: {e}")
             st.session_state.device_enabled['sipm'] = False
@@ -2549,13 +2587,14 @@ if st.session_state.mode == "Setup & Monitor":
                                 import select
                                 import sys
                                 
-                                # Start WaveDump with unbuffered output
+                                # Start WaveDump with stdbuf to force unbuffered output for live streaming
+                                # stdbuf -o0 disables stdout buffering, making output appear immediately
                                 process = subprocess.Popen(
-                                    [digitizer_obj.wavedump_path, str(digitizer_obj.config_file)],
+                                    ['stdbuf', '-o0', digitizer_obj.wavedump_path, str(digitizer_obj.config_file)],
                                     cwd=str(digitizer_obj.working_dir),
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT,
-                                    bufsize=0  # Unbuffered
+                                    bufsize=0  # Unbuffered on Python side too
                                 )
                                 
                                 start_time = time.time()
@@ -2704,11 +2743,20 @@ if st.session_state.mode == "Setup & Monitor":
                     st.rerun()
             
             # Live terminal output (if enabled)
-            if show_wavedump_output and len(shared_state.manual_acq_data['output']) > 0:
+            # Live terminal output (if enabled) - Always show section when checkbox is enabled
+            if show_wavedump_output:
                 st.markdown("---")
                 st.markdown("### WaveDump Output")
-                output_text = "\n".join(shared_state.manual_acq_data['output'][-50:])  # Last 50 lines
-                st.code(output_text, language="text")
+                
+                num_lines = len(shared_state.manual_acq_data['output'])
+                st.caption(f"📝 Captured {num_lines} lines")
+                
+                if num_lines > 0:
+                    output_text = "\n".join(shared_state.manual_acq_data['output'][-50:])  # Last 50 lines
+                    st.code(output_text, language="text")
+                else:
+                    st.info("💡 No output captured yet. WaveDump output will appear here during acquisition.")
+                    st.caption("Note: If output doesn't appear, WaveDump may be buffering its output. Check terminal for live output.")
             
             # Show last acquisition results
             if shared_state.manual_acq_data['result']:
@@ -2811,13 +2859,24 @@ else:
         st.session_state.run_status_text = shared_state.progress_data['status_text']
         st.session_state.run_position = shared_state.progress_data['position']
     
-    # Check if thread completed or was cancelled
+    # Check if thread completed or was cancelled - trigger rerun for logging
     if shared_state.progress_data['result'] is not None:
-        st.session_state.run_result = shared_state.progress_data['result']
-        st.session_state.run_active = False
-        st.session_state.run_scheduled = False
-        shared_state.progress_data['active'] = False
-        shared_state.progress_data['scheduled'] = False
+        # Sync result to session state
+        has_run_result = hasattr(st.session_state, 'run_result')
+        
+        if not has_run_result or st.session_state.run_result != shared_state.progress_data['result']:
+            st.session_state.run_result = shared_state.progress_data['result']
+            st.session_state.run_active = False
+            st.session_state.run_scheduled = False
+            shared_state.progress_data['active'] = False
+            shared_state.progress_data['scheduled'] = False
+            # Trigger rerun so the thread cleanup check (below) can log the run
+            st.rerun()
+        else:
+            # Result already synced, don't rerun again
+            st.session_state.run_result = shared_state.progress_data['result']
+            st.session_state.run_active = False
+            st.session_state.run_scheduled = False
     
     # PMT Serial Number Input - Two PMTs
     st.subheader("PMT Configuration")
@@ -3307,6 +3366,7 @@ else:
                     'run_name': run_name,
                     'sequence_type': sequence_type,
                     'pmt_serials': f"{st.session_state.pmt_serial_number['pmt1']}, {st.session_state.pmt_serial_number['pmt2']}",
+                    'pmt_voltages': f"{st.session_state.pmt_voltages[0]}V, {st.session_state.pmt_voltages[1]}V",
                     'start_time': datetime.now()
                 }
                 st.session_state.run_metadata = metadata
@@ -3408,67 +3468,28 @@ else:
     
     # Check thread status and display result if complete
     if st.session_state.run_thread is not None:
-        if not st.session_state.run_thread.is_alive():
+        is_alive = st.session_state.run_thread.is_alive()
+        if not is_alive:
             # Thread finished!
             st.session_state.run_active = False
             st.session_state.run_scheduled = False
             
             result = st.session_state.run_result
             if result:
-                print(f"[DEBUG] Run completed with result: {result.get('status')}")
+                # Worker thread already logged the run - just display status message
                 
-                # Try to get metadata from session_state first, then shared_state (for GUI restarts)
-                metadata = None
+                # Clear metadata from session state (worker already cleared from shared_state)
                 if hasattr(st.session_state, 'run_metadata'):
-                    metadata = st.session_state.run_metadata
-                    print(f"[DEBUG] Using metadata from session_state")
-                elif 'run_metadata' in shared_state.progress_data:
-                    metadata = shared_state.progress_data['run_metadata']
-                    print(f"[DEBUG] Using metadata from shared_state (GUI was restarted)")
+                    del st.session_state.run_metadata
                 
-                # Log run completion if we have metadata
-                if metadata:
-                    print(f"[DEBUG] Logging run: {metadata['run_name']}")
-                    
-                    # Determine status
-                    if result.get('status') == 'success':
-                        status = 'success'
-                    elif result.get('status') == 'cancelled':
-                        status = 'cancelled'
-                    else:
-                        status = 'failed'
-                    
-                    # Get actual start time (excludes delay) from shared_state
-                    actual_start = shared_state.progress_data.get('actual_start_time', metadata['start_time'])
-                    
-                    # Log to file
-                    log_run_completion(
-                        run_name=metadata['run_name'],
-                        sequence_type=metadata['sequence_type'],
-                        pmt_serials=metadata['pmt_serials'],
-                        status=status,
-                        start_time=actual_start,
-                        end_time=datetime.now()
-                    )
-                    
-                    # Clear metadata from both locations
-                    if hasattr(st.session_state, 'run_metadata'):
-                        del st.session_state.run_metadata
-                    if 'run_metadata' in shared_state.progress_data:
-                        del shared_state.progress_data['run_metadata']
-                else:
-                    print(f"[DEBUG] No metadata found in session_state or shared_state - run will not be logged!")
-                    print(f"[DEBUG] Session state has run_metadata: {hasattr(st.session_state, 'run_metadata')}")
-                    print(f"[DEBUG] Shared state has run_metadata: {'run_metadata' in shared_state.progress_data}")
-                
-                # Show status message
+                # Show status message (worker thread already logged)
                 if result.get('status') == 'success':
-                    st.success(f"✓ {sequence_type} completed successfully!")
+                    st.success(f"✓ {st.session_state.run_metadata.get('sequence_type', 'Run') if hasattr(st.session_state, 'run_metadata') else 'Run'} completed successfully!")
                     st.balloons()
                 elif result.get('status') == 'cancelled':
                     st.info(f"⏹ {result.get('message', 'Scheduled start was cancelled')}")
                 else:
-                    st.error(f"✗ {sequence_type} failed: {result.get('error', 'Unknown error')}")
+                    st.error(f"✗ Run failed: {result.get('error', 'Unknown error')}")
             
             # Clear thread reference
             st.session_state.run_thread = None
