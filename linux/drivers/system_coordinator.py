@@ -19,8 +19,8 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(script_dir)
 sys.path.insert(0, parent_dir)
 # Local imports
-from xarm_pmt_controller import XArmPMTController
-from caen_digitizer_wavedump import CAENDigitizerWaveDump
+from drivers.xarm_pmt_controller import XArmPMTController
+from drivers.caen_digitizer_wavedump import CAENDigitizerWaveDump
 from api_client.device_api_client import WindowsDeviceClient
 
 
@@ -240,9 +240,13 @@ class HyperKSystemCoordinator:
             
         except Exception as e:
             logger.error(f"Dark current check failed: {e}")
-            # Emergency stop on failure
-            self.emergency_shutdown_all(reason=f"Dark current check error: {e}")
-            raise
+            return {
+                'status': 'error',
+                'error': str(e),
+                'pmt1_serial': pmt1_serial,
+                'pmt2_serial': pmt2_serial,
+                'duration': duration
+            }
     
     def run_full_scan(
         self,
@@ -297,9 +301,12 @@ class HyperKSystemCoordinator:
             
         except Exception as e:
             logger.error(f"Full scan failed: {e}")
-            # Emergency stop on failure
-            self.emergency_shutdown_all(reason=f"Scan error: {e}")
-            raise
+            return {
+                'status': 'error',
+                'error': str(e),
+                'pmt1_serial': pmt1_serial,
+                'pmt2_serial': pmt2_serial
+            }
     
     def run_single_pmt_scan(
         self,
@@ -351,9 +358,12 @@ class HyperKSystemCoordinator:
             
         except Exception as e:
             logger.error(f"Single PMT scan failed: {e}")
-            # Emergency stop on failure
-            self.emergency_shutdown_all(reason=f"Scan error: {e}")
-            raise
+            return {
+                'status': 'error',
+                'error': str(e),
+                'pmt_number': pmt_number,
+                'serial': serial
+            }
     
     # =========================================================================
     # CONTEXT MANAGER SUPPORT

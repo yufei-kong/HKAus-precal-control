@@ -13,9 +13,15 @@ from pathlib import Path
 from typing import Optional, Callable, List
 from loguru import logger
 import sys
+import os
+
+# Add parent directory to path so we can import drivers
+script_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(script_dir)
+sys.path.insert(0, parent_dir)
 
 # Import digitizer driver
-from caen_digitizer_wavedump import CAENDigitizerWaveDump
+from drivers.caen_digitizer_wavedump import CAENDigitizerWaveDump
 
 
 class XArmPMTController:
@@ -176,7 +182,7 @@ class XArmPMTController:
         """
         Move through buffer positions for safe transitions.
         
-        Used when moving to/from high zenith angles (>= 40°) to avoid
+        Used when moving to/from high zenith angles (>= 35°) to avoid
         singularities and collisions.
         
         Args:
@@ -205,13 +211,6 @@ class XArmPMTController:
         
         logger.info(f"Moving to scan point: θ={zenith}°, φ={azimuth}°")
         
-        # For high zenith angles, use buffer positions
-        if zenith >= 40:
-            # Determine if we should reverse buffer sequence
-            # (optimization for movement efficiency)
-            reverse = (azimuth % 180 != 0)
-            self._move_through_buffers(azimuth, reverse=reverse)
-        
         # Move to target position
         target_angles = self._rotate_base(self.joint_angles[zenith], azimuth)
         self.move_to_position(target_angles)
@@ -238,7 +237,7 @@ class XArmPMTController:
         self,
         pmt1_serial: str,
         pmt2_serial: str,
-        duration: int = 300,
+        duration: int = 600,
         progress_callback: Optional[Callable] = None
     ) -> dict:
         """
@@ -259,10 +258,10 @@ class XArmPMTController:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         logger.info(f"Starting dark current check ({duration}s)")
         
-        # Move robot to safe position
-        if progress_callback:
-            progress_callback(10, "Moving to safe position...")
-        self.move_to_intermediate()
+        # # Move robot to safe position
+        # if progress_callback:
+        #     progress_callback(10, "Moving to safe position...")
+        # self.move_to_intermediate()
         
         # Configure DAQ for all PMT channels
         if progress_callback:
@@ -271,7 +270,10 @@ class XArmPMTController:
         channels = [2, 3, 4]  # PMT1, PMT2, PMT3 (monitor)
         self.digitizer.configure(
             run_duration=duration,
-            channels=channels
+            channels=channels,
+            trigger_channel=channels,
+            trigger_threshold=5,
+            channel_trigger_mode='ACQUISITION_ONLY'
         )
         
         # Acquire data
@@ -292,13 +294,13 @@ class XArmPMTController:
         if progress_callback:
             progress_callback(85, "Reading waveform data...")
         
-        waveforms = self.digitizer.get_all_waveforms(channels)
+        waveforms = self.digitizer.get_all_wavefiles(channels)
         
         # Organize files
         if progress_callback:
             progress_callback(90, "Organizing files...")
         
-        save_dir = f"../WaveDumpSaves/dark_current_{timestamp}"
+        save_dir = f"/home/hyperkaus/WaveDumpSaves/dark_current_{timestamp}"
         self.digitizer.organize_files(
             save_dir=save_dir,
             prefix="dark_current",
@@ -370,13 +372,17 @@ class XArmPMTController:
         self.move_to_intermediate()
         
         # Scan loop
-        total_points = len(zeniths) * len(azimuths)
+        total_points = (len(zeniths[1:]) * len(azimuths))+1
         current_point = 0
         visited_zero = False
         
+        Urob_change = 35  # Robot configuration change angle (degrees)
+
         for i, azimuth in enumerate(azimuths):
             # Alternate zenith direction for efficiency
             zen_list = zeniths if i % 2 == 0 else list(reversed(zeniths))
+            
+            passed_rob_change = False  # Reset flag for each azimuth
             
             for zenith in zen_list:
                 # Skip duplicate zenith=0 (independent of azimuth)
@@ -386,20 +392,45 @@ class XArmPMTController:
                         continue
                     visited_zero = True
                 
-                # Move to scan point
+                # Check if crossing robot configuration threshold (only once per azimuth)
+                if i % 2 == 0:  # Even index: going UP (0 -> 10 -> 20 -> 30 -> 35 -> 40 -> 50)
+                    if zenith >= Urob_change and not passed_rob_change:
+                        passed_rob_change = True
+                        logger.info(f"Crossing robot config threshold (going up) at θ={zenith}°, φ={azimuth}°")
+                        # Use buffer positions (forward order)
+                        for buffer in self.buffer_positions:
+                            rotated_buffer = self._rotate_base(buffer, azimuth)
+                            self.move_to_position(rotated_buffer)
+                else:  # Odd index: going DOWN (50 -> 40 -> 35 -> 30 -> 20 -> 10 -> 0)
+                    if zenith <= Urob_change and not passed_rob_change:
+                        passed_rob_change = True
+                        logger.info(f"Crossing robot config threshold (going down) at θ={zenith}°, φ={azimuth}°")
+                        # Use buffer positions (reverse order)
+                        for buffer in reversed(self.buffer_positions):
+                            rotated_buffer = self._rotate_base(buffer, azimuth)
+                            self.move_to_position(rotated_buffer)
+                
+                # Move to scan point (without automatic buffer handling)
                 position_name = f"θ={zenith}°, φ={azimuth}°"
                 if progress_callback:
                     progress_pct = int((current_point / total_points) * 100)
                     progress_callback(progress_pct, f"PMT{pmt_number} - {position_name}", position_name)
                 
-                self.move_to_scan_point(zenith, azimuth)
+                # Move directly to target position
+                target_angles = self._rotate_base(self.joint_angles[zenith], azimuth)
+                self.move_to_position(target_angles)
+                
+                # Stabilization delay
+                time.sleep(3)
+                
+                logger.debug(f"✓ At scan point: θ={zenith}°, φ={azimuth}°")
                 
                 # Configure and acquire
                 self.digitizer.configure(run_duration=daq_runtime, channels=channels)
-                self.digitizer.acquire(timeout=daq_runtime + 30)
+                self.digitizer.acquire()  # No timeout - augmented WaveDump handles timing
                 
                 # Organize files
-                save_dir = f"../WaveDumpSaves/scan_{timestamp}/{serial}"
+                save_dir = f"/home/hyperkaus/WaveDumpSaves/scan_{timestamp}/{serial}"
                 self.digitizer.organize_files(
                     save_dir=save_dir,
                     prefix=f"theta{zenith}_phi{azimuth}",
@@ -409,7 +440,26 @@ class XArmPMTController:
                 
                 current_point += 1
         
-        # Return to home
+        # Safe return to home - simple 3-step process
+        logger.info("Returning to home via safe path...")
+        if progress_callback:
+            progress_callback(95, "Returning to home...", "Retracing")
+        
+        # Step 1: Move to zenith=0 (PMT_TOP) at current azimuth
+        logger.info("Step 1: Moving to θ=0° at current azimuth...")
+        current_angles = self.arm.get_servo_angle()[1]  # Get current position
+        current_azimuth = current_angles[0]  # Current base rotation
+        
+        # Move to PMT_TOP position rotated to current azimuth
+        pmt_top_at_current_az = self._rotate_base(self.PMT_TOP, current_azimuth)
+        self.move_to_position(pmt_top_at_current_az)
+        
+        # Step 2: Rotate to azimuth=0 while at zenith=0
+        logger.info("Step 2: Rotating to φ=0° at θ=0°...")
+        self.move_to_position(self.PMT_TOP)  # PMT_TOP is already at azimuth=0
+        
+        # Step 3: Move to intermediate then home
+        logger.info("Step 3: Moving to intermediate then home...")
         self.move_to_intermediate()
         self.move_to_initial()
         

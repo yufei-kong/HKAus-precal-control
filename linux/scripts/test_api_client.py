@@ -17,7 +17,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(script_dir)
 sys.path.insert(0, parent_dir)
 
-from drivers.api_client import WindowsDeviceClient
+from api_client.device_api_client import WindowsDeviceClient
 
 # Configure logger
 logger.remove()
