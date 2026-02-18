@@ -14,6 +14,7 @@ import time
 import threading
 from datetime import datetime, timedelta
 import pandas as pd
+import altair as alt
 import numpy as np
 import json
 import sys
@@ -986,13 +987,10 @@ if 'device_states_synced' not in st.session_state:
         
         # Sync PMT HV state from device
         try:
-            # Query each PMT channel individually
-            for ch in range(1, 4):  # Channels 1, 2, 3
+            for ch in range(1, 4):
                 status = st.session_state.api_client.caen_get_status(ch)
-                # Update pmt_power array (indexed 0-2 for channels 1-3)
                 st.session_state.pmt_power[ch-1] = status.get('power_on', False)
             
-            # Set device_enabled based on whether any PMT is on
             any_on = any(st.session_state.pmt_power)
             st.session_state.device_enabled['pmt_hv'] = any_on
             
@@ -1005,10 +1003,8 @@ if 'device_states_synced' not in st.session_state:
         # Sync laser state from device
         try:
             status = st.session_state.api_client.laser_get_status()
-            # Update individual state variables for sidebar display
             st.session_state.laser_tec_on = status.get('tec_on', False)
             st.session_state.laser_ld_on = status.get('ld_on', False)
-            # Laser is considered "enabled" if both TEC and LD are on
             laser_on = st.session_state.laser_tec_on and st.session_state.laser_ld_on
             st.session_state.device_enabled['laser'] = laser_on
             logger.info(f"Synced laser state: device_enabled={laser_on}, TEC={st.session_state.laser_tec_on}, LD={st.session_state.laser_ld_on}")
@@ -1094,6 +1090,11 @@ if 'cleanup_registered' not in st.session_state:
     
     atexit.register(cleanup_devices)
     st.session_state.cleanup_registered = True
+
+# Device state sync is handled by:
+# - First load: one-time sync block above (line ~973)
+# - Run Sequence callbacks: optimistic state update + background API command  
+# - Setup & Monitor: direct queries in each device tab
 
 # ============================================================================
 # SIDEBAR
@@ -1247,6 +1248,7 @@ with st.sidebar:
                 st.session_state.run_active = False
                 st.session_state.device_enabled = {k: False for k in st.session_state.device_enabled}
                 st.session_state.emergency_stop_confirm = False
+                logger.warning("[EMERGENCY] All devices shut down via emergency stop button")
                 time.sleep(1)
                 st.rerun()
         with col2:
@@ -1481,10 +1483,12 @@ if st.session_state.mode == "Setup & Monitor":
                                     st.session_state.caen_channels[i]['power_on'] = True
                                     st.session_state.caen_channels[i]['ramping'] = True
                                     st.session_state.device_enabled['pmt_hv'] = True
+                                    logger.info(f"[PMT_HV] Channel {i} turned ON (Setup & Monitor)")
                                     st.success(f"✓ Channel {i} ON")
                                     time.sleep(0.3)
                                     st.rerun()
                                 except Exception as e:
+                                    logger.error(f"[PMT_HV] Channel {i} ON failed: {e}")
                                     st.error(f"Power on failed: {e}")
                         else:
                             if st.button(f"Turn OFF", key=f'pmt_off_{i}', use_container_width=True):
@@ -1496,11 +1500,13 @@ if st.session_state.mode == "Setup & Monitor":
                                     # Update overall device status
                                     any_on = any(st.session_state.caen_channels[ch]['power_on'] for ch in range(1, 4))
                                     st.session_state.device_enabled['pmt_hv'] = any_on
+                                    logger.info(f"[PMT_HV] Channel {i} turned OFF, any_on={any_on} (Setup & Monitor)")
                                     
                                     st.info(f"✓ Channel {i} OFF")
                                     time.sleep(0.3)
                                     st.rerun()
                                 except Exception as e:
+                                    logger.error(f"[PMT_HV] Channel {i} OFF failed: {e}")
                                     st.error(f"Power off failed: {e}")
             
             st.markdown("---")
@@ -1639,10 +1645,12 @@ if st.session_state.mode == "Setup & Monitor":
                             st.session_state.sipm_supply.ON()
                             st.session_state.sipm_output_on = True
                             st.session_state.device_enabled['sipm'] = True
+                            logger.info("[SiPM] Output turned ON (Setup & Monitor)")
                             st.success("✓ Output enabled")
                             time.sleep(0.5)
                             st.rerun()
                         except Exception as e:
+                            logger.error(f"[SiPM] ON failed: {e}")
                             st.error(f"Failed to enable output: {e}")
                 
                 with col_b:
@@ -1656,10 +1664,12 @@ if st.session_state.mode == "Setup & Monitor":
                             st.session_state.sipm_supply.OFF()
                             st.session_state.sipm_output_on = False
                             st.session_state.device_enabled['sipm'] = False
+                            logger.info("[SiPM] Output turned OFF (Setup & Monitor)")
                             st.info("✓ Output disabled")
                             time.sleep(0.5)
                             st.rerun()
                         except Exception as e:
+                            logger.error(f"[SiPM] OFF failed: {e}")
                             st.error(f"Failed to disable output: {e}")
             
             st.markdown("---")
@@ -1888,10 +1898,12 @@ if st.session_state.mode == "Setup & Monitor":
                             try:
                                 st.session_state.api_client.siggen_enable_output(channel, True)
                                 st.session_state.device_enabled['siggen'] = True  # Sync session state
+                                logger.info(f"[SIGGEN] Output turned ON, channel={channel} (Setup & Monitor)")
                                 time.sleep(1.0)  # Wait for device to update
                                 st.success("✓ Output enabled")
                                 st.rerun()
                             except Exception as e:
+                                logger.error(f"[SIGGEN] ON failed: {e}")
                                 st.error(f"Failed to enable: {e}")
                     
                     with col_b:
@@ -1904,10 +1916,12 @@ if st.session_state.mode == "Setup & Monitor":
                             try:
                                 st.session_state.api_client.siggen_enable_output(channel, False)
                                 st.session_state.device_enabled['siggen'] = False  # Sync session state
+                                logger.info(f"[SIGGEN] Output turned OFF, channel={channel} (Setup & Monitor)")
                                 time.sleep(1.0)  # Wait for device to update
                                 st.info("✓ Output disabled")
                                 st.rerun()
                             except Exception as e:
+                                logger.error(f"[SIGGEN] OFF failed: {e}")
                                 st.error(f"Failed to disable: {e}")
                 
                 st.markdown("---")
@@ -2028,10 +2042,12 @@ if st.session_state.mode == "Setup & Monitor":
                                 st.session_state.api_client.laser_set_temperature(temp_setpoint)
                                 st.session_state.api_client.laser_set_tec_power(True)
                                 st.session_state.laser_tec_on = True
+                                logger.info(f"[LASER] TEC turned ON, setpoint={temp_setpoint}°C (Setup & Monitor)")
                                 st.success("✓ TEC enabled - waiting for stabilization...")
                                 time.sleep(0.5)
                                 st.rerun()
                             except Exception as e:
+                                logger.error(f"[LASER] TEC ON failed: {e}")
                                 st.error(f"Failed to enable TEC: {e}")
                     
                     with col_b:
@@ -2046,14 +2062,17 @@ if st.session_state.mode == "Setup & Monitor":
                                 if st.session_state.laser_ld_on:
                                     st.session_state.api_client.laser_set_ld_power(False)
                                     st.session_state.laser_ld_on = False
+                                    logger.info("[LASER] LD turned OFF (safety shutdown before TEC OFF)")
                                 
                                 st.session_state.api_client.laser_set_tec_power(False)
                                 st.session_state.laser_tec_on = False
                                 st.session_state.device_enabled['laser'] = False
+                                logger.info("[LASER] TEC turned OFF (Setup & Monitor)")
                                 st.info("✓ TEC disabled")
                                 time.sleep(0.5)
                                 st.rerun()
                             except Exception as e:
+                                logger.error(f"[LASER] TEC OFF failed: {e}")
                                 st.error(f"Failed to disable TEC: {e}")
                 
                 with col2:
@@ -2131,10 +2150,12 @@ if st.session_state.mode == "Setup & Monitor":
                                 st.session_state.api_client.laser_set_ld_power(True)
                                 st.session_state.laser_ld_on = True
                                 st.session_state.device_enabled['laser'] = True
+                                logger.info(f"[LASER] LD turned ON, pulse_current={pulse_current}mA, bias_current={bias_current}mA, trigger={trigger_mode} (Setup & Monitor)")
                                 st.success("✓ LD enabled")
                                 time.sleep(0.5)
                                 st.rerun()
                             except Exception as e:
+                                logger.error(f"[LASER] LD ON failed: {e}")
                                 st.error(f"Failed to enable LD: {e}")
                         
                         # Show why LD can't be enabled
@@ -2155,10 +2176,12 @@ if st.session_state.mode == "Setup & Monitor":
                             try:
                                 st.session_state.api_client.laser_set_ld_power(False)
                                 st.session_state.laser_ld_on = False
+                                logger.info("[LASER] LD turned OFF (Setup & Monitor)")
                                 st.info("✓ LD disabled")
                                 time.sleep(0.5)
                                 st.rerun()
                             except Exception as e:
+                                logger.error(f"[LASER] LD OFF failed: {e}")
                                 st.error(f"Failed to disable LD: {e}")
                 
                 st.markdown("---")
@@ -2837,7 +2860,7 @@ else:
     
     st.title("Run Sequence Mode")
     st.caption("Automated measurement sequences with coordinated device control")
-
+    
     # Auto-refresh when run is active OR scheduled to update progress/countdown display
     if st.session_state.run_active or st.session_state.run_scheduled:
         count = st_autorefresh(interval=1000, key="run_sequence_autorefresh")  # 1 second for countdown
@@ -2941,111 +2964,166 @@ else:
     st.markdown("---")
     
     # Device ON/OFF controls on main page - synced with Setup & Monitor
+    # Using on_click callbacks so state changes happen BEFORE the render cycle,
+    # avoiding race conditions with st_autorefresh triggering concurrent reruns.
     st.subheader("System Control")
+    
+    def _toggle_pmt_hv():
+        """Callback: optimistic state update + background API command."""
+        if not st.session_state.get('api_client'):
+            return
+        new_state = not st.session_state.device_enabled['pmt_hv']
+        logger.info(f"[PMT_HV] Toggle: setting to {new_state} (Run Sequence)")
+        # Optimistic state update (instant, before render)
+        updated = dict(st.session_state.device_enabled)
+        updated['pmt_hv'] = new_state
+        st.session_state.device_enabled = updated
+        st.session_state.pmt_power = [new_state, new_state, new_state]
+        # Fire API command in background thread
+        api = st.session_state.api_client
+        voltages = list(st.session_state.pmt_voltages)
+        def _cmd():
+            try:
+                if new_state:
+                    for ch in range(1, 4):
+                        api.caen_set_voltage(ch, voltages[ch-1])
+                        api.caen_set_power(ch, True)
+                else:
+                    for ch in range(1, 4):
+                        api.caen_set_power(ch, False)
+                logger.info(f"[PMT_HV] Background command completed")
+            except Exception as e:
+                logger.error(f"[PMT_HV] Background command failed: {e}")
+        threading.Thread(target=_cmd, daemon=True).start()
+    
+    def _toggle_sipm():
+        """Callback: SiPM is local serial (fast), runs inline."""
+        if not st.session_state.get('sipm_connected', False):
+            return
+        try:
+            new_state = not st.session_state.device_enabled['sipm']
+            logger.info(f"[SiPM] Toggle: setting to {new_state} (Run Sequence)")
+            if new_state:
+                st.session_state.sipm_supply.ON()
+            else:
+                st.session_state.sipm_supply.OFF()
+            # Update state (serial is fast, so this always completes)
+            updated = dict(st.session_state.device_enabled)
+            updated['sipm'] = new_state
+            st.session_state.device_enabled = updated
+            st.session_state.sipm_output_on = new_state
+            logger.info(f"[SiPM] Toggle complete")
+        except Exception as e:
+            logger.error(f"[SiPM] Toggle failed: {e}")
+            st.session_state._toggle_error = f"SiPM control failed: {e}"
+    
+    def _toggle_siggen():
+        """Callback: optimistic state update + background API command."""
+        if not st.session_state.get('api_client'):
+            return
+        new_state = not st.session_state.device_enabled['siggen']
+        logger.info(f"[SIGGEN] Toggle: setting to {new_state} (Run Sequence)")
+        # Optimistic state update (instant, before render)
+        updated = dict(st.session_state.device_enabled)
+        updated['siggen'] = new_state
+        st.session_state.device_enabled = updated
+        # Fire API command in background thread
+        api = st.session_state.api_client
+        def _cmd():
+            try:
+                api.siggen_enable_output(1, new_state)
+                logger.info(f"[SIGGEN] Background command completed")
+            except Exception as e:
+                logger.error(f"[SIGGEN] Background command failed: {e}")
+        threading.Thread(target=_cmd, daemon=True).start()
+    
+    def _toggle_laser():
+        """Callback: optimistic state update + background API command."""
+        if not st.session_state.get('api_client'):
+            return
+        new_state = not st.session_state.device_enabled['laser']
+        logger.info(f"[LASER] Toggle: setting to {new_state} (Run Sequence)")
+        # Optimistic state update (instant, before render)
+        updated = dict(st.session_state.device_enabled)
+        updated['laser'] = new_state
+        st.session_state.device_enabled = updated
+        st.session_state.laser_tec_on = new_state
+        st.session_state.laser_ld_on = new_state
+        # Fire API command in background thread
+        api = st.session_state.api_client
+        def _cmd():
+            try:
+                if new_state:
+                    api.laser_set_power(tec_enabled=True)
+                    time.sleep(0.5)
+                    api.laser_set_power(ld_enabled=True)
+                else:
+                    api.laser_set_power(ld_enabled=False, tec_enabled=False)
+                logger.info(f"[LASER] Background command completed")
+            except Exception as e:
+                logger.error(f"[LASER] Background command failed: {e}")
+        threading.Thread(target=_cmd, daemon=True).start()
+    
+    # Show any toggle errors from previous callback
+    if st.session_state.get('_toggle_error'):
+        st.error(st.session_state._toggle_error)
+        del st.session_state._toggle_error
     
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        if st.button(
+        st.button(
             f"{'✓' if st.session_state.device_enabled['pmt_hv'] else '○'} PMT HV",
             use_container_width=True,
-            key='toggle_pmt'
-        ):
-            if st.session_state.get('api_client'):
-                try:
-                    # Toggle all PMT channels
-                    new_state = not st.session_state.device_enabled['pmt_hv']
-                    
-                    if new_state:
-                        # Turn ON all PMT channels
-                        for ch_num in range(1, 4):
-                            v_set = st.session_state.pmt_voltages[ch_num-1]
-                            st.session_state.api_client.caen_set_voltage(ch_num, v_set)
-                            st.session_state.api_client.caen_set_power(ch_num, True)
-                            st.session_state.caen_channels[ch_num]['power_on'] = True
-                            st.session_state.caen_channels[ch_num]['v_set'] = v_set
-                        st.session_state.device_enabled['pmt_hv'] = True
-                        st.session_state.pmt_power = [True, True, True]
-                    else:
-                        # Turn OFF all PMT channels
-                        for ch_num in range(1, 4):
-                            st.session_state.api_client.caen_set_power(ch_num, False)
-                            st.session_state.caen_channels[ch_num]['power_on'] = False
-                        st.session_state.device_enabled['pmt_hv'] = False
-                        st.session_state.pmt_power = [False, False, False]
-                except Exception as e:
-                    st.error(f"PMT HV control failed: {e}")
-            st.rerun()
+            key='toggle_pmt',
+            on_click=_toggle_pmt_hv
+        )
     
     with col2:
-        if st.button(
+        st.button(
             f"{'✓' if st.session_state.device_enabled['sipm'] else '○'} SiPM",
             use_container_width=True,
-            key='toggle_sipm'
-        ):
-            if st.session_state.get('sipm_connected', False):
-                try:
-                    if not st.session_state.device_enabled['sipm']:
-                        st.session_state.sipm_supply.ON()
-                        st.session_state.device_enabled['sipm'] = True
-                        st.session_state.sipm_output_on = True
-                    else:
-                        st.session_state.sipm_supply.OFF()
-                        st.session_state.device_enabled['sipm'] = False
-                        st.session_state.sipm_output_on = False
-                except Exception as e:
-                    st.error(f"SiPM control failed: {e}")
-            st.rerun()
+            key='toggle_sipm',
+            on_click=_toggle_sipm
+        )
     
     with col3:
-        if st.button(
+        st.button(
             f"{'✓' if st.session_state.device_enabled['siggen'] else '○'} Sig Gen",
             use_container_width=True,
-            key='toggle_siggen'
-        ):
-            if st.session_state.get('api_client'):
-                try:
-                    channel = 1  # Default to channel 1
-                    if not st.session_state.device_enabled['siggen']:
-                        st.session_state.api_client.siggen_enable_output(channel, True)
-                        st.session_state.device_enabled['siggen'] = True
-                    else:
-                        st.session_state.api_client.siggen_enable_output(channel, False)
-                        st.session_state.device_enabled['siggen'] = False
-                except Exception as e:
-                    st.error(f"Signal generator control failed: {e}")
-            st.rerun()
+            key='toggle_siggen',
+            on_click=_toggle_siggen
+        )
     
     with col4:
-        if st.button(
+        st.button(
             f"{'✓' if st.session_state.device_enabled['laser'] else '○'} Laser",
             use_container_width=True,
-            key='toggle_laser'
-        ):
-            if st.session_state.get('api_client'):
-                try:
-                    if not st.session_state.device_enabled['laser']:
-                        # Turn on TEC first, then LD
-                        st.session_state.api_client.laser_set_power(tec_enabled=True)
-                        time.sleep(0.5)
-                        st.session_state.api_client.laser_set_power(ld_enabled=True)
-                        st.session_state.laser_tec_on = True
-                        st.session_state.laser_ld_on = True
-                        st.session_state.device_enabled['laser'] = True
-                    else:
-                        # Turn off both
-                        st.session_state.api_client.laser_set_power(ld_enabled=False, tec_enabled=False)
-                        st.session_state.laser_tec_on = False
-                        st.session_state.laser_ld_on = False
-                        st.session_state.device_enabled['laser'] = False
-                except Exception as e:
-                    st.error(f"Laser control failed: {e}")
-            st.rerun()
+            key='toggle_laser',
+            on_click=_toggle_laser
+        )
     
     st.markdown("---")
     
     # Real-time monitoring section with auto-refresh
     st.subheader("📊 Real-time Monitoring")
+    
+    def _padded_chart(times, values, y_label, height=150, min_pad=1.0):
+        """Create an Altair line chart with y-axis padded around the data range."""
+        df = pd.DataFrame({'Time': times, y_label: values})
+        if len(values) > 0:
+            y_min = min(values)
+            y_max = max(values)
+            y_range = y_max - y_min
+            pad = max(y_range * 0.15, min_pad)
+            domain = [y_min - pad, y_max + pad]
+        else:
+            domain = [0, 1]
+        chart = alt.Chart(df).mark_line().encode(
+            x=alt.X('Time:T', axis=alt.Axis(format='%H:%M:%S', title=None)),
+            y=alt.Y(f'{y_label}:Q', scale=alt.Scale(domain=domain))
+        ).properties(height=height)
+        st.altair_chart(chart, use_container_width=True)
     
     # Auto-refresh only in Run Sequence mode (not in Setup & Monitor)
     if st.session_state.mode == 'Run Sequence':
@@ -3142,12 +3220,13 @@ else:
         
         for idx, col in enumerate([col1, col2, col3], start=1):
             with col:
-                st.markdown(f"*Ch{idx}*")
-                i_df = pd.DataFrame({
-                    'Time': st.session_state.caen_current_history['timestamps'],
-                    'Current (µA)': st.session_state.caen_current_history[f'ch{idx}']
-                })
-                st.line_chart(i_df.set_index('Time'), height=150)
+                latest_i = st.session_state.caen_channels[idx]['current_mon']
+                st.markdown(f"*Ch{idx}* — **{latest_i:.2f} µA**")
+                _padded_chart(
+                    st.session_state.caen_current_history['timestamps'],
+                    st.session_state.caen_current_history[f'ch{idx}'],
+                    'Current (µA)', min_pad=20
+                )
     else:
         st.info("Enable PMT HV to start monitoring")
     
@@ -3159,12 +3238,13 @@ else:
         
         for idx, col in enumerate([col1, col2, col3], start=1):
             with col:
-                st.markdown(f"*Ch{idx}*")
-                v_df = pd.DataFrame({
-                    'Time': st.session_state.caen_voltage_history['timestamps'],
-                    'Voltage (V)': st.session_state.caen_voltage_history[f'ch{idx}']
-                })
-                st.line_chart(v_df.set_index('Time'), height=150)
+                latest_v = st.session_state.caen_channels[idx]['voltage_mon']
+                st.markdown(f"*Ch{idx}* — **{latest_v:.1f} V**")
+                _padded_chart(
+                    st.session_state.caen_voltage_history['timestamps'],
+                    st.session_state.caen_voltage_history[f'ch{idx}'],
+                    'Voltage (V)', min_pad=20
+                )
     else:
         st.info("Enable PMT HV to start monitoring")
     
@@ -3175,50 +3255,82 @@ else:
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            st.markdown("*Ch1*")
-            i_df = pd.DataFrame({
-                'Time': st.session_state.sipm_current_history['timestamps'],
-                'Current (A)': st.session_state.sipm_current_history['ch1']
-            })
-            st.line_chart(i_df.set_index('Time'), height=150)
+            latest_ch1 = st.session_state.sipm_current_history['ch1'][-1] * 1000 if st.session_state.sipm_current_history['ch1'] else 0
+            st.markdown(f"*Ch1* — **{latest_ch1:.2f} mA**")
+            _padded_chart(
+                st.session_state.sipm_current_history['timestamps'],
+                [x * 1000 for x in st.session_state.sipm_current_history['ch1']],
+                'Current (mA)', min_pad=5
+            )
         
         with col2:
-            st.markdown("*Ch2*")
-            i_df = pd.DataFrame({
-                'Time': st.session_state.sipm_current_history['timestamps'],
-                'Current (A)': st.session_state.sipm_current_history['ch2']
-            })
-            st.line_chart(i_df.set_index('Time'), height=150)
+            latest_ch2 = st.session_state.sipm_current_history['ch2'][-1] * 1000 if st.session_state.sipm_current_history['ch2'] else 0
+            st.markdown(f"*Ch2* — **{latest_ch2:.2f} mA**")
+            _padded_chart(
+                st.session_state.sipm_current_history['timestamps'],
+                [x * 1000 for x in st.session_state.sipm_current_history['ch2']],
+                'Current (mA)', min_pad=2
+            )
         
         # col3 intentionally left empty for alignment
     else:
         st.info("Enable SiPM to start monitoring")
     
-    # Display Laser temperature monitoring (metrics only, no graph)
-    st.markdown("**Laser Temperature:**")
+    # Display Laser monitoring
+    st.markdown("**Laser:**")
     if st.session_state.get('api_client') and (st.session_state.laser_tec_on or st.session_state.laser_ld_on):
         try:
+            from datetime import datetime
             status = st.session_state.api_client.laser_get_status()
+            
+            # Collect laser history data
+            now = datetime.now()
+            max_points = 100
+            st.session_state.laser_history['ld_temp'].append(status.get('ld_temp_actual', 0))
+            st.session_state.laser_history['board_temp'].append(status.get('board_temp', 0))
+            st.session_state.laser_history['timestamps'].append(now)
+            
+            # Trim to max points
+            if len(st.session_state.laser_history['timestamps']) > max_points:
+                for key in st.session_state.laser_history:
+                    st.session_state.laser_history[key] = st.session_state.laser_history[key][-max_points:]
             
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("LD Temp", f"{status.get('ld_temp_actual', 0):.2f} °C")
+                ld_temp = status.get('ld_temp_actual', 0)
+                st.markdown(f"*LD Temp* — **{ld_temp:.2f} °C**")
+                if len(st.session_state.laser_history['timestamps']) > 1:
+                    _padded_chart(
+                        st.session_state.laser_history['timestamps'],
+                        st.session_state.laser_history['ld_temp'],
+                        'LD Temp (°C)', min_pad=1
+                    )
             
             with col2:
                 board_temp = status.get('board_temp', 0)
                 if board_temp > 42:
-                    temp_status = "⚠️ High"
-                elif board_temp > 30:
-                    temp_status = "Normal"
+                    temp_status = "⚠️"
                 else:
-                    temp_status = "Cool"
-                st.metric("Board Temp", f"{board_temp:.2f} °C", delta=temp_status)
+                    temp_status = ""
+                st.markdown(f"*Board Temp* — **{board_temp:.2f} °C** {temp_status}")
+                if len(st.session_state.laser_history['timestamps']) > 1:
+                    _padded_chart(
+                        st.session_state.laser_history['timestamps'],
+                        st.session_state.laser_history['board_temp'],
+                        'Board Temp (°C)', min_pad=1
+                    )
             
             # col3 intentionally left empty for alignment
         except:
             st.info("Could not read laser status")
     else:
+        # Clear history when laser is off
+        if len(st.session_state.laser_history['timestamps']) > 0 and not st.session_state.laser_tec_on:
+            st.session_state.laser_history = {
+                'ld_temp': [], 'board_temp': [], 'pulse_current': [],
+                'pd_current': [], 'timestamps': []
+            }
         st.info("Enable Laser to start monitoring")
     
     st.markdown("---")
