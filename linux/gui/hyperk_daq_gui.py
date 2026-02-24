@@ -618,9 +618,9 @@ def save_custom_sequence(name: str, config: dict):
 def get_sequence_list():
     """Get list of available sequences including custom ones"""
     default_sequences = [
-        "Dark Current Check (5 min)",
-        "Single PMT Test (10 min)", 
-        "Full PMT Scan (2 hours)",
+        "Dark Current Check (10 min)",
+        "Single PMT Test (3.5 hours)", 
+        "Full PMT Scan (7 hours)",
     ]
     
     if 'custom_sequences' in st.session_state and st.session_state.custom_sequences:
@@ -2237,7 +2237,7 @@ if st.session_state.mode == "Setup & Monitor":
             stage_range = stage_max - stage_min
             stage_progress = (st.session_state.linear_stage_pos - stage_min) / stage_range
             
-            st.progress(stage_progress)
+            st.progress(max(0.0, min(1.0, stage_progress)))
             st.caption(f"Position: {st.session_state.linear_stage_pos} mm")
             
             # Quick position buttons
@@ -2746,7 +2746,7 @@ if st.session_state.mode == "Setup & Monitor":
                 
                 # Progress bar
                 progress = shared_state.manual_acq_data['progress']
-                st.progress(progress / 100.0)
+                st.progress(max(0.0, min(1.0, progress / 100.0)))
                 
                 # Countdown/elapsed time
                 if shared_state.manual_acq_data['start_time']:
@@ -3370,7 +3370,7 @@ else:
             **Single PMT Scan - {pmt_select}:**
             - Scans one PMT at multiple angles
             - Robot moves through zenith/azimuth positions
-            - Estimated time: ~30 minutes
+            - Estimated time: ~3.5 hours
             """)
         
         elif "Full PMT Scan" in sequence_type:
@@ -3378,7 +3378,7 @@ else:
             **Full PMT Scan:**
             - Scans both PMT1 and PMT2
             - Complete angular characterization
-            - Estimated time: 2 hours
+            - Estimated time: ~7 hours
             """)
     
     with col2:
@@ -3650,7 +3650,7 @@ else:
         total_delay = shared_state.progress_data.get('delay_seconds', countdown_seconds)
         if total_delay > 0:
             progress = 1.0 - (countdown_seconds / total_delay)
-            st.progress(progress)
+            st.progress(max(0.0, min(1.0, progress)))
         
         st.info("💡 The run will start automatically when the countdown reaches zero. Press 'Cancel Scheduled Start' to abort.")
     
@@ -3700,7 +3700,7 @@ else:
         
         # Display real progress from callback
         progress = st.session_state.run_progress / 100
-        st.progress(progress)
+        st.progress(max(0.0, min(1.0, progress)))
         
         col1, col2, col3 = st.columns(3)
         with col1:

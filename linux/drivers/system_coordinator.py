@@ -296,7 +296,7 @@ class HyperKSystemCoordinator:
                 'status': 'success',
                 'pmt1_serial': pmt1_serial,
                 'pmt2_serial': pmt2_serial,
-                'total_positions': len(zeniths) * len(azimuths) * 2
+                'total_positions': (1 + ((len(zeniths)-1) * len(azimuths))) * 2
             }
             
         except Exception as e:
@@ -353,7 +353,7 @@ class HyperKSystemCoordinator:
                 'status': 'success',
                 'pmt_number': pmt_number,
                 'serial': serial,
-                'total_positions': len(zeniths) * len(azimuths)
+                'total_positions': 1 + ((len(zeniths)-1) * len(azimuths))
             }
             
         except Exception as e:

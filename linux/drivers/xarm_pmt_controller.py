@@ -477,7 +477,7 @@ class XArmPMTController:
             'save_dir': save_dir
         }
     
-    def scan_both_pmts(
+    def full_pmt_scan(
         self,
         pmt1_serial: str,
         pmt2_serial: str,
