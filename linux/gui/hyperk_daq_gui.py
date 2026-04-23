@@ -3437,6 +3437,22 @@ else:
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
+
+        use_custom_scan_angles = st.checkbox("Use custom scan angles", value = Felse)
+
+        zenith_input = st.text_input(
+            "Zenith angles (comma separated)",
+            value = "0,10,20,30,40,50"
+        )
+
+        azimuth_input = st.text_input(
+            "Azimuth angles (comma separated)",
+            value = "0,90,180,270"
+        )
+
+        def parse_angles(s):
+            return [int(x.strip()) for x in s.split(",") if x.strip()]
+        
         # Show different button text based on state
         if st.session_state.run_scheduled:
             button_text = "Waiting (Scheduled)"
@@ -3461,6 +3477,22 @@ else:
                     disabled=button_disabled,
                     key="start_run_button"):
             if system_ready:
+                if use_custom_scan_angles:
+                    try:
+                        zeniths = parse_angles(zenith_input)
+                        azimuths = parse_angles(azimuth_input)
+                    except:
+                        st.error("Invalid angle input")
+                        st.stop()
+
+                    if not zeniths or not azimuths:
+                        st.error("Angles cannot be empty")
+                        st.stop()
+
+            else:
+                zenith = [0, 10, 20, 30, 40, 50]
+                azimuth = [0, 90, 180, 270]
+
                 # Calculate delay
                 delay_seconds = st.session_state.delay_hours * 3600 + st.session_state.delay_minutes * 60
                 
@@ -3492,7 +3524,7 @@ else:
                 shared_state.progress_data['scheduled'] = (delay_seconds > 0)
                 shared_state.progress_data['result'] = None
                 shared_state.progress_data['cancelled'] = False
-                
+               
                 # Prepare parameters based on sequence type
                 params = {}
                 
@@ -3508,8 +3540,8 @@ else:
                     params = {
                         'pmt_num': pmt_num,
                         'serial': st.session_state.pmt_serial_number[f"pmt{pmt_num}"],
-                        'zeniths': [0, 10, 20, 30, 40, 50],
-                        'azimuths': [0, 90, 180, 270],
+                        'zeniths': zeniths,
+                        'azimuths': azimuths,
                         'daq_runtime': 600
                     }
                 
@@ -3517,8 +3549,8 @@ else:
                     params = {
                         'pmt1_serial': st.session_state.pmt_serial_number["pmt1"],
                         'pmt2_serial': st.session_state.pmt_serial_number["pmt2"],
-                        'zeniths': [0, 10, 20, 30, 40, 50],
-                        'azimuths': [0, 90, 180, 270],
+                        'zeniths': zeniths,
+                        'azimuths': azimuths,
                         'daq_runtime': 600
                     }
                 
