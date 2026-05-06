@@ -358,6 +358,20 @@ class XArmPMTController:
         logger.info(f"  Azimuths: {azimuths}")
         logger.info(f"  Runtime per point: {daq_runtime}s")
         
+        # Set points to scan
+
+        selected_zeniths = zeniths
+        selected_azimuths = azimuths
+
+        zeniths = [0, 10, 20, 30, 40, 50]
+        azimuths = [0, 90, 180, 270]
+
+        selected_points = {
+            (z, a)
+            for z in selected_zeniths
+            for a in selected_azimuths
+        }
+
         # Determine channels based on PMT
         if pmt_number == 1:
             channels = [0, 1, 2, 4]  # Trigger, SiPM, PMT1, Monitor
@@ -423,6 +437,11 @@ class XArmPMTController:
                 # Stabilization delay
                 time.sleep(3)
                 
+                # Skip if not in user custom angle list
+                if (zenith, azimuth) not in selected_points:
+                    current_point += 1
+                    continue
+
                 logger.debug(f"✓ At scan point: θ={zenith}°, φ={azimuth}°")
                 
                 # Configure and acquire
