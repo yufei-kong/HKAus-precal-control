@@ -3442,17 +3442,19 @@ else:
 
         zenith_input = st.text_input(
             "Zenith angles (comma separated)",
-            value = "0,10,20,30,40,50"
+            value = "0,10,20,30,40,50",
+            help = "allowed values: 0,10,20,30,40,50"
         )
 
         azimuth_input = st.text_input(
             "Azimuth angles (comma separated)",
-            value = "0,90,180,270"
+            value = "0,90,180,270",
+            help = "allowed values: 0,90,180,270"
         )
 
         def parse_angles(s):
-            return [int(x.strip()) for x in s.split(",") if x.strip()]
-        
+            return [float(x.strip()) for x in s.split(",") if x.strip()]
+
         # Show different button text based on state
         if st.session_state.run_scheduled:
             button_text = "Waiting (Scheduled)"
@@ -3490,8 +3492,8 @@ else:
                         st.stop()
 
             else:
-                zenith = [0, 10, 20, 30, 40, 50]
-                azimuth = [0, 90, 180, 270]
+                zeniths = [0, 10, 20, 30, 40, 50]
+                azimuths = [0, 90, 180, 270]
 
                 # Calculate delay
                 delay_seconds = st.session_state.delay_hours * 3600 + st.session_state.delay_minutes * 60
